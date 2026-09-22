@@ -1,0 +1,998 @@
+{
+  "configuration_source": "Fixed paper settings.",
+  "jobs": [
+    {
+      "id": "lista_l2",
+      "method": "lista",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00125,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.005,
+      "stage2_learning_rate": 0.00125
+    },
+    {
+      "id": "lista_l3",
+      "method": "lista",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00125,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.005,
+      "stage2_learning_rate": 0.00125
+    },
+    {
+      "id": "lista_l4",
+      "method": "lista",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00125,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.005,
+      "stage2_learning_rate": 0.00125
+    },
+    {
+      "id": "lista_l5",
+      "method": "lista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00125,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.005,
+      "stage2_learning_rate": 0.00125
+    },
+    {
+      "id": "alista_l2",
+      "method": "alista",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l3",
+      "method": "alista",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l4",
+      "method": "alista",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l5",
+      "method": "alista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l2",
+      "method": "lamp",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l3",
+      "method": "lamp",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l4",
+      "method": "lamp",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l5",
+      "method": "lamp",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "slista_l5_t1",
+      "method": "slista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "theta_snn": 1.83,
+        "decoder_tau": 0.8,
+        "surrogate_width": 0.31,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "slista_l10_t1",
+      "method": "slista",
+      "depth": 10,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "theta_snn": 1.2,
+        "decoder_tau": 0.95,
+        "surrogate_width": 0.2,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "slista_l15_t1",
+      "method": "slista",
+      "depth": 15,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "theta_snn": 1.35,
+        "decoder_tau": 1.0,
+        "surrogate_width": 0.19,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "slista_l20_t1",
+      "method": "slista",
+      "depth": 20,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s28",
+        "m": 141,
+        "s": 28
+      },
+      "parameters": {
+        "theta_snn": 1.28,
+        "decoder_tau": 0.98,
+        "surrogate_width": 0.35,
+        "learning_rate": 0.00125,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.005,
+      "stage2_learning_rate": 0.00125
+    },
+    {
+      "id": "lista_l2",
+      "method": "lista",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "lista_l3",
+      "method": "lista",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "lista_l4",
+      "method": "lista",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "lista_l5",
+      "method": "lista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "alista_l2",
+      "method": "alista",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l3",
+      "method": "alista",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l4",
+      "method": "alista",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l5",
+      "method": "alista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l2",
+      "method": "lamp",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l3",
+      "method": "lamp",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l4",
+      "method": "lamp",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l5",
+      "method": "lamp",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "slista_l5_t1",
+      "method": "slista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "theta_snn": 1.83,
+        "decoder_tau": 0.8,
+        "surrogate_width": 0.31,
+        "learning_rate": 0.0005,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.002,
+      "stage2_learning_rate": 0.0005
+    },
+    {
+      "id": "slista_l10_t1",
+      "method": "slista",
+      "depth": 10,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "theta_snn": 1.2,
+        "decoder_tau": 0.95,
+        "surrogate_width": 0.2,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "slista_l15_t1",
+      "method": "slista",
+      "depth": 15,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "theta_snn": 1.35,
+        "decoder_tau": 1.0,
+        "surrogate_width": 0.19,
+        "learning_rate": 0.0005,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.002,
+      "stage2_learning_rate": 0.0005
+    },
+    {
+      "id": "slista_l20_t1",
+      "method": "slista",
+      "depth": 20,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s42",
+        "m": 141,
+        "s": 42
+      },
+      "parameters": {
+        "theta_snn": 1.28,
+        "decoder_tau": 0.98,
+        "surrogate_width": 0.35,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "lista_l2",
+      "method": "lista",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lista_l3",
+      "method": "lista",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00125,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.005,
+      "stage2_learning_rate": 0.00125
+    },
+    {
+      "id": "lista_l4",
+      "method": "lista",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.00125,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.005,
+      "stage2_learning_rate": 0.00125
+    },
+    {
+      "id": "lista_l5",
+      "method": "lista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l2",
+      "method": "alista",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l3",
+      "method": "alista",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l4",
+      "method": "alista",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "alista_l5",
+      "method": "alista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l2",
+      "method": "lamp",
+      "depth": 2,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l3",
+      "method": "lamp",
+      "depth": 3,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l4",
+      "method": "lamp",
+      "depth": 4,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "lamp_l5",
+      "method": "lamp",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "threshold_scale": 1.0,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "slista_l5_t1",
+      "method": "slista",
+      "depth": 5,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "theta_snn": 1.83,
+        "decoder_tau": 0.8,
+        "surrogate_width": 0.31,
+        "learning_rate": 0.0025,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.01,
+      "stage2_learning_rate": 0.0025
+    },
+    {
+      "id": "slista_l10_t1",
+      "method": "slista",
+      "depth": 10,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "theta_snn": 1.2,
+        "decoder_tau": 0.95,
+        "surrogate_width": 0.2,
+        "learning_rate": 0.00075,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.003,
+      "stage2_learning_rate": 0.00075
+    },
+    {
+      "id": "slista_l15_t1",
+      "method": "slista",
+      "depth": 15,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "theta_snn": 1.35,
+        "decoder_tau": 1.0,
+        "surrogate_width": 0.19,
+        "learning_rate": 0.0005,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.002,
+      "stage2_learning_rate": 0.0005
+    },
+    {
+      "id": "slista_l20_t1",
+      "method": "slista",
+      "depth": 20,
+      "time_steps": 1,
+      "condition": {
+        "id": "m141_s14",
+        "m": 141,
+        "s": 14
+      },
+      "parameters": {
+        "theta_snn": 1.28,
+        "decoder_tau": 0.98,
+        "surrogate_width": 0.35,
+        "learning_rate": 0.0005,
+        "aux_weight": 0.0,
+        "grad_clip": 1.0
+      },
+      "stage1_learning_rate": 0.002,
+      "stage2_learning_rate": 0.0005
+    }
+  ],
+  "figure": {
+    "sample_index": null,
+    "selection_seed": 20260829,
+    "distribution_samples": 2000,
+    "selection_batch_size": 512,
+    "distribution_batch_size": 512,
+    "distribution_seed": 20260830,
+    "energy_conditions": [
+      "m141_s14",
+      "m141_s28",
+      "m141_s42"
+    ],
+    "example_seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ]
+  },
+  "protocol": {
+    "n": 256,
+    "max_m": 218,
+    "matrix_seed": 40042,
+    "amplitude_min": 0.0,
+    "amplitude_max": 4.0,
+    "batch_size": 1024,
+    "stage1_steps": 5000,
+    "stage2_steps": 15000,
+    "validation_interval": 250,
+    "validation_samples": 1536,
+    "selection_samples": 6000,
+    "test_samples": 10000,
+    "eval_batch_size": 1000,
+    "stage2_sources": 1,
+    "stage2_lr_factors": [
+      0.25
+    ],
+    "cosine_eta_min": 1e-07,
+    "max_boundary_expansions": 3,
+    "model_seed": 1616000,
+    "train_seed": 20260801,
+    "stage2_seed": 20260811,
+    "validation_seed": 20260822,
+    "selection_seed": 20260823,
+    "test_seed": 20260827,
+    "noise_seed": 20260828,
+    "e_mac_uj": 4.6e-06,
+    "e_ac_uj": 9e-07
+  },
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46
+  ]
+}

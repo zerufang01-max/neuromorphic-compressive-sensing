@@ -1,0 +1,129 @@
+{
+  "seed": 42,
+  "train_snr_db": 5.0,
+  "l1": 0.0001,
+  "fixed": {
+    "lamp": {
+      "epochs": 100,
+      "lr_scale": 1.0
+    },
+    "alista": {
+      "epochs": 100,
+      "lr_scale": 1.0
+    },
+    "lista_ann": {
+      "epochs": 100,
+      "lr_scale": 1.0
+    },
+    "lista_snn_1": {
+      "epochs": 100,
+      "lr_scale": 0.3
+    }
+  },
+  "learned": {
+    "alista": {
+      "epochs": 100,
+      "lr_scale": 0.2
+    },
+    "lamp": {
+      "epochs": 100,
+      "lr_scale": 0.5
+    },
+    "lista_ann": {
+      "epochs": 100,
+      "lr_scale": 0.5
+    },
+    "lista_snn_1": {
+      "epochs": 100,
+      "lr_scale": 0.2
+    }
+  },
+  "quantization": {
+    "alista": {
+      "2": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      },
+      "4": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      },
+      "6": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      },
+      "8": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      }
+    },
+    "lamp": {
+      "2": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      },
+      "4": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      },
+      "6": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      },
+      "8": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      }
+    },
+    "lista_ann": {
+      "2": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      },
+      "4": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      },
+      "6": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      },
+      "8": {
+        "epochs": 100,
+        "lr_scale": 0.5
+      }
+    },
+    "lista_snn_1": {
+      "2": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      },
+      "4": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      },
+      "6": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      },
+      "8": {
+        "epochs": 100,
+        "lr_scale": 0.2
+      }
+    }
+  },
+  "final_slista": {
+    "epochs": 200,
+    "lr_p": 0.0006,
+    "lr_pd": 0.00015,
+    "lr_phi": 0.00045,
+    "lr_dictionary": 0.0009
+  },
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46
+  ]
+}
