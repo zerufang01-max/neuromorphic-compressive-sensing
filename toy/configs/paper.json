@@ -1,5 +1,5 @@
 {
-  "description": "Frozen jobs for the synthetic experiments (matched-depth design). Learning rates from train.py --mode search (ladder 1e-6 to 1.0, no model at the search boundary); S-LISTA beta=2, alpha=0.4.",
+  "description": "Jobs of the synthetic experiments (matched-depth design): models, depths, conditions and learning rates; S-LISTA beta=2, alpha=0.4.",
   "protocol": {
     "n": 256,
     "max_m": 218,

@@ -70,14 +70,7 @@ def _registry():
         # Vanilla settings of the baseline, so the Vanilla curve comes from one training code.
         entries.append(Experiment(f"vanilla_dense_c{c}", "vanilla", "Vanilla SNN", channels=c,
                                   semantic_weight=0.01))       # Vanilla value
-    # ---------------------------------------------- task-supervision weight study
-    for w in C.SEMANTIC_SWEEP:
-        entries.append(Experiment(semweight_key(w), "slista", "S-LISTA", semantic_weight=w))
     return {e.key: e for e in entries}
-
-
-def semweight_key(weight):
-    return f"slista_dense_sem{weight:g}"
 
 
 REGISTRY = _registry()
@@ -88,7 +81,6 @@ GROUPS = {
     "budget": [f"slista_dense_c{c}" for c in C.BUDGET_CHANNELS if c != 4]
               + [f"vanilla_dense_c{c}" for c in C.BUDGET_CHANNELS],
     "baselines": ["vanilla_dense", "vanilla_aer", "ann_lista", "ann_lstm"],
-    "semweight": [semweight_key(w) for w in C.SEMANTIC_SWEEP],
 }
 
 # Experiments that make up each paper item.

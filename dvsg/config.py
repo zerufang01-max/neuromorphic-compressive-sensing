@@ -106,10 +106,6 @@ SLISTA_TRAINING = {
     "classifier_lr": 5e-4,
 }
 
-# Task-supervision weight study: slista_dense with these weights, 5 seeds each,
-# compared with slista_dense (0.01) and slista_dense_no_semantic (0).  SHD uses 3.0.
-SEMANTIC_SWEEP = [0.03, 0.1, 0.3, 1.0, 3.0]
-
 CLASSIFIER_TRAINING = {"epochs": 100, "lr_min": 1e-6, "weight_decay": 1e-4}
 
 # Downstream classifier (all methods, including the baselines whose reconstruction weights

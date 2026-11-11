@@ -110,8 +110,8 @@ class Config:
         "weight_decay": 0.0,
     }
     # Base learning rates of every method.  Each job multiplies all rates of
-    # its method by one scale s (configs/paper.json "lr_scale", selected by
-    # lr_search.py on the validation split), so only the ratios between the
+    # its method by one scale s (configs/paper.json "lr_scale", selected on
+    # the validation split), so only the ratios between the
     # parameter groups below are fixed.  S-LISTA: P, G, thresholds and eta use
     # lr_model; the sensing matrix 0.5 lr_model; the dictionary 1.0 lr_model.
     LISTA_SNN_CONFIG = {

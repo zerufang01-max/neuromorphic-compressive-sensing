@@ -28,14 +28,14 @@ def save_json(path, value):
 
 
 def checkpoint_path(output, seed, condition_id, model_id):
-    """Layout written by train.py --mode fixed."""
+    """Layout written by train.py."""
     return Path(output) / f"seed{seed}" / "checkpoints" / f"{condition_id}__{model_id}.pth"
 
 
 def load_model(path, device):
     """Rebuild a trained model and its sensing matrix from a checkpoint."""
     payload = torch.load(path, map_location=device, weights_only=False)
-    # Older checkpoints also stored search-only settings; ignore unknown keys.
+    # Ignore unknown keys.
     known = Protocol.__dataclass_fields__
     job = payload["job"]
     cfg = Protocol(**{k: v for k, v in payload["protocol"].items() if k in known})

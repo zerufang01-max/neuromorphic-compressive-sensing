@@ -376,8 +376,7 @@ def load_shd_quant(path):
 
 
 def dvsg_clean(frame):
-    exp = frame["experiment"].astype(str)
-    return frame[~exp.str.startswith("slista_dense_sem")].copy()
+    return frame.copy()
 
 
 def load_dvsg(root):

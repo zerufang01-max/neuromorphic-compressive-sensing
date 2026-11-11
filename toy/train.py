@@ -1,17 +1,10 @@
 """Training for the synthetic experiments.
 
-Two modes:
-  --mode search  learning-rate search on the hyper-parameter selection set
-                 (stage 1 grid, expanded one ladder step at a time while the best
-                 rate is at the edge of the tested range, then stage 2 at
-                 stage2_lr_factor x the best stage-1 rate).  Writes
-                 <output>/search/selected_jobs.json in the format of
-                 configs/paper.json; copy it there to freeze the protocol.
-  --mode fixed   train the frozen jobs of configs/paper.json for every seed in
-                 TRAINING_SEEDS (stage 1 then stage 2, no search).
-
-Within a run the checkpoint with the lowest validation NMSE is kept.  Test
-data are never used here.
+Trains the jobs of configs/paper.json (model, depth, condition and learning
+rates) for every seed in TRAINING_SEEDS: stage 1, then stage 2 from the best
+stage-1 checkpoint at stage2_lr_factor times the stage-1 rate.  Within a run
+the checkpoint with the lowest validation NMSE is kept.  Test data are never
+used here.
 """
 
 import argparse
@@ -28,8 +21,7 @@ from pathlib import Path
 import torch
 
 from config import (
-    ALL_CONDITIONS, GRAD_CLIP, INITIAL_LEARNING_RATES, LEARNING_RATE_LADDER,
-    NUMERICAL_EPS, TRAINING_SEEDS, Protocol, experiment_grid, model_parameters,
+    ALL_CONDITIONS, GRAD_CLIP, NUMERICAL_EPS, TRAINING_SEEDS, Protocol,
 )
 from data import generator, measurement_matrix, set_seed, sparse_batch
 from models import build_model, nmse_loss
@@ -136,8 +128,7 @@ def launch(jobs, work, gpus, workers_per_gpu, replace_stale=False):
     Resuming: a job whose result and checkpoint both exist and whose stored job
     is identical is skipped.  A job that was interrupted (no result yet) is
     rerun from the start.  If a finished result belongs to a *different* job
-    with the same name, it is an error unless replace_stale=True (used only for
-    search stage 2, whose job changes when the best stage-1 rate changes); the
+    with the same name, it is an error unless replace_stale=True; the
     stale files are then moved to <work>/stale/ and the job is rerun."""
     for folder in ("jobs", "results", "checkpoints", "logs"):
         (work / folder).mkdir(parents=True, exist_ok=True)
@@ -188,84 +179,8 @@ def launch(jobs, work, gpus, workers_per_gpu, replace_stale=False):
     return [read_json(work / "results" / f"{job['job_id']}.json") for job in jobs]
 
 
-# --------------------------------------------------------------- search mode
-def lr_tag(value):
-    return f"{value:.0e}".replace("-", "m").replace("+", "")
-
-
-def search_job(condition, architecture, learning_rate):
-    return {"condition": condition, "method": architecture["method"],
-            "depth": architecture["depth"], "id": architecture["id"],
-            "parameters": model_parameters(architecture),
-            "stage1_learning_rate": learning_rate, "stage2_learning_rate": None,
-            "job_id": f"{condition['id']}__{architecture['id']}__lr{lr_tag(learning_rate)}"}
-
-
-def search(args):
-    root = Path(args.output).resolve()
-    cfg = Protocol()
-    wanted = {c["id"] for c in selected_conditions(args)}
-    grid = [(c, a) for c, a in experiment_grid()
-            if c["id"] in wanted and (not args.ids or a["id"] in args.ids)]
-    stage1 = launch([search_job(c, a, lr) for c, a in grid for lr in INITIAL_LEARNING_RATES],
-                    root / "search" / "stage1", args.gpus, args.workers_per_gpu)
-    # Expand one ladder step at a time until every optimum is interior to the
-    # tested range or sits at an end of LEARNING_RATE_LADDER.  Already finished
-    # stage-1 jobs are skipped by launch(), so a rerun replays this quickly.
-    while True:
-        extra = []
-        for c, a in grid:
-            rows = [r for r in stage1 if r["condition"]["id"] == c["id"] and r["id"] == a["id"]]
-            tested = sorted(r["stage1_learning_rate"] for r in rows)
-            best = min(rows, key=lambda r: r["selection_nmse_db"])["stage1_learning_rate"]
-            index = LEARNING_RATE_LADDER.index(best)
-            if best == tested[0] and index > 0:
-                extra.append(search_job(c, a, LEARNING_RATE_LADDER[index - 1]))
-            elif best == tested[-1] and index + 1 < len(LEARNING_RATE_LADDER):
-                extra.append(search_job(c, a, LEARNING_RATE_LADDER[index + 1]))
-        if not extra:
-            break
-        stage1 += launch(extra, root / "search" / "stage1", args.gpus, args.workers_per_gpu)
-    stage2_jobs, boundary = [], []
-    for c, a in grid:
-        rows = [r for r in stage1 if r["condition"]["id"] == c["id"] and r["id"] == a["id"]]
-        best = min(rows, key=lambda r: r["selection_nmse_db"])
-        tested = sorted(r["stage1_learning_rate"] for r in rows)
-        if best["stage1_learning_rate"] in (tested[0], tested[-1]):
-            # Still at the edge of the tested range after all expansions.
-            boundary.append({"condition": c["id"], "id": a["id"],
-                             "best_learning_rate": best["stage1_learning_rate"],
-                             "tested": tested})
-        job = {k: best[k] for k in ("condition", "method", "depth", "id", "parameters",
-                                    "stage1_learning_rate")}
-        job["stage2_learning_rate"] = best["stage1_learning_rate"] * cfg.stage2_lr_factor
-        job["job_id"] = f"{c['id']}__{a['id']}"
-        stage2_jobs.append(job)
-    final = launch(stage2_jobs, root / "search" / "stage2", args.gpus, args.workers_per_gpu,
-                   replace_stale=True)
-    frozen = {(r["condition"]["id"], r["id"]): {
-        k: r[k] for k in ("condition", "method", "depth", "id", "parameters",
-                          "stage1_learning_rate", "stage2_learning_rate")} for r in final}
-    # Merge into the current config: searched jobs replace their entries, jobs of
-    # experiment_grid() that were not searched now are kept, anything else is dropped.
-    base = read_json(args.config)
-    needed = {(c["id"], a["id"]) for c, a in experiment_grid()}
-    jobs = [frozen.pop((j["condition"]["id"], j["id"]), j) for j in base["jobs"]
-            if (j["condition"]["id"], j["id"]) in needed]
-    jobs += list(frozen.values())
-    save_json(root / "search" / "selected_jobs.json",
-              {**base, "description": "Output of train.py --mode search; review before "
-                                      "copying to configs/paper.json.",
-               "search_boundary_warnings": boundary, "jobs": jobs})
-    for row in boundary:
-        print(f"WARNING: {row['condition']} / {row['id']}: best learning rate "
-              f"{row['best_learning_rate']} is at the edge of the tested range {row['tested']}")
-    print(f"{len(boundary)} model(s) at the search boundary")
-    print(f"Wrote {root / 'search' / 'selected_jobs.json'}; review and copy to configs/paper.json")
-
-
-# ---------------------------------------------------------------- fixed mode
-def fixed(args):
+# ------------------------------------------------------------------ training
+def train_jobs(args):
     config = read_json(args.config)
     wanted = {c["id"] for c in selected_conditions(args)}
     jobs = [j for j in config["jobs"] if j["condition"]["id"] in wanted
@@ -274,8 +189,7 @@ def fixed(args):
         raise ValueError("No jobs selected")
     missing = [j["id"] for j in jobs if not j.get("stage1_learning_rate")]
     if missing:
-        raise ValueError(f"No learning rate for {missing}; run --mode search and copy "
-                         "selected_jobs.json to configs/paper.json first")
+        raise ValueError(f"No learning rate for {missing} in {args.config}")
     for seed in args.seeds or config.get("seeds", TRAINING_SEEDS):
         protocol = dict(config["protocol"], model_seed=seed,
                         train_seed=20260801 + seed, stage2_seed=20260811 + seed,
@@ -300,7 +214,6 @@ def selected_conditions(args):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("fixed", "search"), default="fixed")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--config", type=Path, default=PAPER_CONFIG)
     parser.add_argument("--gpus", nargs="+", type=int, default=[0])
@@ -321,7 +234,5 @@ if __name__ == "__main__":
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         run_job(read_json(arguments.job), Path(arguments.result),
                 Path(arguments.checkpoint), device)
-    elif arguments.mode == "search":
-        search(arguments)
     else:
-        fixed(arguments)
+        train_jobs(arguments)

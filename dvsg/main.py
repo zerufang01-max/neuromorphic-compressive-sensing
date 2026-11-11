@@ -323,14 +323,13 @@ def summarize(seeds):
     tables = C.OUTPUTS / "tables"
     metrics = ["nmse", "nmse_full", "nmse_framewise", "acc", "head_acc", "bits", "tx_rate", "rx_rate"]
     keys = [k for g in ("baselines", "slista", "budget") for k in E.GROUPS[g]]
-    keys += [k for k in E.GROUPS["semweight"] if E.formal_run_dir(k, seeds[0]).parent.is_dir()]
     rows, missing = collect_eval(keys, seeds)
     for row in rows:
         row["snr_db"] = float(row["snr_db"])
     if missing:
         print(f"[summarize] missing runs ({len(missing)}): " + ", ".join(missing[:12])
               + (" ..." if len(missing) > 12 else ""))
-    scan_keys = E.MAIN_KEYS + E.SEMANTIC_KEYS + E.GROUPS["semweight"]
+    scan_keys = E.MAIN_KEYS + E.SEMANTIC_KEYS
     snr = table([r for r in rows if r["experiment"] in scan_keys], ["experiment", "channel", "snr_db"], metrics)
     write_csv(tables / "snr_scans_mean_std.csv", snr)
     write_csv(tables / "snr_scans_per_seed.csv", [r for r in rows if r["experiment"] in scan_keys])
@@ -366,7 +365,6 @@ def summarize(seeds):
             entry[f"robust_{metric}_mean"], entry[f"robust_{metric}_std"], _ = _mean_std(seed_means)
         robust.append(entry)
     write_csv(tables / "robustness_mean_std.csv", robust)
-    semantic_weight_table(rows, robust, tables)
     print(f"[summarize] tables in {tables}")
     for entry in main:
         print(f"  Table 1 {entry['experiment']:22s} NMSE {entry['nmse_mean']:7.2f} +- {entry['nmse_std']:.2f}"
@@ -376,46 +374,6 @@ def summarize(seeds):
               f"{entry['robust_acc_mean']:6.2f} | head {entry['robust_head_acc_mean']:6.2f}")
 
 
-def semantic_weight_table(rows, robust, tables):
-    """Task-supervision weight study: one line per weight (0 = slista_dense_no_semantic)."""
-    weights = {"slista_dense_no_semantic": 0.0, "slista_dense": C.SLISTA_TRAINING["semantic_weight"]}
-    weights.update({E.semweight_key(w): w for w in C.SEMANTIC_SWEEP})
-    robust_by_key = {r["experiment"]: r for r in robust}
-    points = [("awgn", 10.0), ("rayleigh", 20.0)]
-    low = {"awgn": (-5.0, 2.0), "rayleigh": (-5.0, 5.0)}      # low-SNR ranges (accuracy averaged)
-    out = []
-    for key, weight in sorted(weights.items(), key=lambda kv: (kv[1], kv[0])):
-        part = [r for r in rows if r["experiment"] == key]
-        if not part:
-            continue
-        entry = {"semantic_weight": weight, "experiment": key, "n_seeds": len({r["seed"] for r in part})}
-        rob = robust_by_key.get(key, {})
-        for metric in ("nmse", "acc", "head_acc"):
-            entry[f"robust_{metric}"] = rob.get(f"robust_{metric}_mean")
-            entry[f"robust_{metric}_std"] = rob.get(f"robust_{metric}_std")
-        for channel, snr in points:
-            for metric in ("nmse", "acc"):
-                vals = [float(r[metric]) for r in part if r["channel"] == channel and r["snr_db"] == snr]
-                entry[f"{channel}{snr:g}_{metric}"], entry[f"{channel}{snr:g}_{metric}_std"], _ = _mean_std(vals)
-        for channel, (lo, hi) in low.items():
-            per_seed = {}
-            for r in part:
-                if r["channel"] == channel and lo <= r["snr_db"] <= hi:
-                    per_seed.setdefault(r["seed"], []).append(float(r["acc"]))
-            means = [sum(v) / len(v) for v in per_seed.values()]
-            entry[f"{channel}_low_acc"], entry[f"{channel}_low_acc_std"], _ = _mean_std(means)
-        out.append(entry)
-    if out:
-        write_csv(tables / "semantic_weight.csv", out)
-        print("[summarize] task-supervision weight (robust NMSE / acc | Rayleigh 20 NMSE / acc | "
-              "low-SNR acc AWGN -5..2 / Rayleigh -5..5)")
-        for e in out:
-            print(f"  w={e['semantic_weight']:<5g} {e['experiment']:26s} n={e['n_seeds']} "
-                  f"{e['robust_nmse']:7.2f} / {e['robust_acc']:5.2f} | {e['rayleigh20_nmse']:7.2f} / "
-                  f"{e['rayleigh20_acc']:5.2f} | {e['awgn_low_acc']:5.2f} / {e['rayleigh_low_acc']:5.2f}")
-
-
-# --------------------------------------------------------------------- CLI
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -423,7 +381,7 @@ def main():
     w.add_argument("--spec", required=True)
     w.add_argument("--gpu", type=int, default=0)
     r = sub.add_parser("run")
-    r.add_argument("--group", nargs="+", choices=["baselines", "slista", "budget", "semweight", "all"], required=True,
+    r.add_argument("--group", nargs="+", choices=["baselines", "slista", "budget", "all"], required=True,
                    help="one or more groups; all runs share one queue")
     r.add_argument("--gpus", type=int, nargs="+", default=C.DEFAULT_GPUS)
     r.add_argument("--per-gpu", type=int, default=1)

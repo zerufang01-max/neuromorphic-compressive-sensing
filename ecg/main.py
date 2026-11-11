@@ -250,7 +250,7 @@ def run_single(job, root, data_dir, cpu=False):
         raise RuntimeError(f'Training produced no selected checkpoint: {folder}')
     validation = obj['trainer'].validate_recon(mode=obj['mode'])
     if job.get('skip_test'):
-        # Searches and tuning: selection uses the validation split only.  With
+        # Validation only: the test split is not evaluated.  With
         # val_stats the operation counts and firing statistics are measured on
         # the validation split as well (columns prefixed Val_).
         result = {'nmse': ''}
@@ -296,8 +296,7 @@ def run_single(job, root, data_dir, cpu=False):
 PHASES = ('fixed', 'learned', 'quantization')
 
 
-# Per-method settings that configs/paper.json ("overrides") or a tuning job
-# may change.  Everything else in Config stays fixed.
+# Per-method settings that configs/paper.json ("overrides") may change.  Everything else in Config stays fixed.
 OVERRIDABLE = {
     'SLISTA_KAPPA': float, 'SLISTA_BETA': float, 'SLISTA_ALPHA': float,
     'SLISTA_PHI_LR_RATIO': float, 'SLISTA_DICTIONARY_LR_RATIO': float,
@@ -323,13 +322,12 @@ def method_settings(settings, target):
 
 def lr_scale_for(settings, phase, target):
     """Selected learning-rate scale: fixed uses lr_scale.fixed; learned and
-    quantization use lr_scale.learned (written by lr_search.py)."""
+    quantization use lr_scale.learned."""
     key = 'fixed' if phase == 'fixed' else 'learned'
     value = settings.get('lr_scale', {}).get(key, {}).get(target)
     if value is None or float(value) <= 0:
         raise ValueError(
-            f'configs/paper.json: lr_scale.{key}.{target} is not set. Run lr_search.py '
-            f'(it writes the selected scales with --write-config).')
+            f'configs/paper.json: lr_scale.{key}.{target} is not set.')
     return float(value)
 
 
@@ -400,7 +398,7 @@ def run_job(job, args, slots):
     folder.mkdir(parents=True, exist_ok=True)
     if job['phase'] != 'fixed':
         seed_root = args.output / f"seed{job['seed']}" if job['directory'].startswith('seed') else args.output
-        # The learning-rate search names its warm-start trial explicitly.
+        # A job may name its warm-start model explicitly.
         fixed_dir = (args.output / job['warm_start_from']) if job.get('warm_start_from') \
             else seed_root / 'fixed' / job['target']
         fixed = read_result(fixed_dir)

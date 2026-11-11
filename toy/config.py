@@ -86,18 +86,12 @@ EXAMPLE_DEPTH = 6
 #   surrogate half-width of layer l = alpha * theta_l
 # Thresholds and eta are trained.
 THRESHOLD_KAPPA = "universal"     # sqrt(2 ln n); or a positive float
-THRESHOLD_END_RATIO = 2.0         # beta (smoke test: 0.5 oscillates, 1 < 2)
-SURROGATE_RELATIVE_WIDTH = 0.4    # alpha (smoke test: best of 0.1-0.5)
+THRESHOLD_END_RATIO = 2.0         # beta
+SURROGATE_RELATIVE_WIDTH = 0.4    # alpha
 THRESHOLD_FLOOR = 1e-2
-SPIKE_PENALTY = 0.0               # lambda_s; 1e-3 had no measurable effect
+SPIKE_PENALTY = 0.0               # lambda_s
 
-# ------------------------------------------------------------ learning rates
-LEARNING_RATE_LADDER = (
-    1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 3e-4, 5e-4,
-    1e-3, 2e-3, 3e-3, 5e-3, 1e-2, 2e-2, 3e-2, 5e-2, 1e-1,
-    2e-1, 3e-1, 5e-1, 1.0,
-)
-INITIAL_LEARNING_RATES = (1e-4, 2e-4, 3e-4, 5e-4, 1e-3, 2e-3, 3e-3, 5e-3)
+# -------------------------------------------------------------- optimisation
 GRAD_CLIP = 1.0
 
 # ------------------------------------------------------------ figure settings
