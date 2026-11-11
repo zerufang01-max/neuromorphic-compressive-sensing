@@ -10,7 +10,7 @@ Official code for **Event-driven signal reconstruction through neuromorphic comp
 
 This work connects intrinsic signal sparsity with the spatiotemporal sparsity of spiking neural networks, extending the benefits of sparsity across sensing, transmission, and reconstruction.
 
-The framework represents compressed measurements and reconstruction updates as sparse events. Its reconstruction algorithm, spike-driven learned iterative shrinkage-thresholding algorithm (S-LISTA), combines learned algorithm unfolding with spike-based updates and continuous correction.
+The framework represents compressed measurements and reconstruction updates as sparse events. Its reconstruction algorithm, spike-driven learned iterative shrinkage-thresholding algorithm (S-LISTA), combines learned algorithm unfolding with spiking layers and a non-spiking readout layer.
 
 Experiments evaluate reconstruction quality, downstream task performance, transmission cost, estimated energy consumption, and robustness under AWGN and Rayleigh fading.
 
@@ -18,12 +18,12 @@ Experiments evaluate reconstruction quality, downstream task performance, transm
 
 The code is organized into four dataset-specific directories:
 
-- **Synthetic signals:** sparse recovery, reconstruction–energy comparisons, firing-rate analysis, and comparison with spiking LCA.
+- **Synthetic signals:** sparse recovery, reconstruction–energy comparisons, the structural analysis of S-LISTA, and comparison with spiking LCA.
 - **ECG:** reconstruction with learned sensing matrices and dictionaries, quantization, and channel robustness.
 - **DVS-Gesture:** visual event reconstruction, downstream classification, and event-based transmission.
 - **SHD:** auditory event reconstruction, downstream classification, and event-based transmission.
 
-Each directory contains its own model implementations, experiment settings, training and evaluation scripts, and dependencies.
+Each directory contains its own model implementations, experiment settings, training and evaluation scripts, and dependencies. The DVS-Gesture baselines are trained with the scripts in `dvsg/baselines/`. `assemble_event_results.py` collects the DVS-Gesture and SHD result files into the figures and tables.
 
 ## Installation
 
@@ -58,7 +58,7 @@ Obtain the datasets from their original providers and use the corresponding prep
 
 Model and training settings are provided in each experiment's configuration files. The reported multi-seed experiments use seeds 42–46.
 
-Energy values are analytical estimates based on operation counts, using 4.6 pJ per multiply–accumulate operation and 0.9 pJ per accumulate operation. They are not measurements of GPU power consumption.
+Energy values are analytical estimates based on operation counts and memory accesses, using 45 nm unit energies (0.3 pJ per multiply–accumulate operation, 0.1 pJ per accumulate operation, and 2.5 pJ per byte of memory access). They are not measurements of GPU power consumption.
 
 See the paper and supplementary information for the experimental protocols, data splits, and evaluation details.
 

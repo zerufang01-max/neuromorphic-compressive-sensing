@@ -10,6 +10,7 @@ import os
 import random
 import re
 from pathlib import Path
+import dataclasses
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,6 +23,7 @@ from snn_models import (
     HybridLISTA,
     LSTMRecon,
     SpikingDenseRecon,
+    SpikingLISTA,
     TemporalConvClassifier,
 )
 from trainer import Trainer
@@ -33,20 +35,33 @@ from wireless_channel import (
 import utils
 
 
-VERSION = "SHD_AWGN_FORMAL_5SEED_V8_ROBUST_SLISTA"
+VERSION = "SHD_SLISTA_V2"
 TRAIN_SNR_DB = 10.0
 SNR_GRID = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7.5, 10, 15, 20]
 SNR_KEYS = [
     "slista_dense", "scnn_dense", "ann_lista", "ann_lstm"
 ]
 MAIN_KEYS = list(SNR_KEYS)
+# "Without temperature relaxation": the TX temperature of Eq. (9) is held at
+# tau_final for the whole run instead of being annealed; everything else
+# (shape of the TX surrogate, channel relaxation, RX, hyperparameters) is
+# identical to slista_aer.
 CORE_KEYS = [
     "slista_aer",
-    "slista_aer_hard_surrogate",
+    "slista_aer_fixed_tau",
     "slista_aer_no_rate",
     "slista_aer_no_semantic",
 ]
+CORE_VARIANTS = {
+    "slista_aer": "S-LISTA with AER",
+    "slista_aer_fixed_tau": "Without temperature relaxation",
+    "slista_aer_no_rate": "Without rate regularization",
+    "slista_aer_no_semantic": "Without task supervision",
+}
 SEMANTIC_SNR_KEYS = ["slista_dense", "slista_dense_no_semantic"]
+# Bit budgets (binary channels per frame; 25 frames per sample).  Multiples
+# of the AER block size 16, which the Rayleigh channel class requires.
+BUDGET_CHANNELS = [48, 64, 96, 128, 192]
 SLISTA_RATE_VALUES = [0.02, 0.05, 0.10, 0.20, 0.30]
 # AER operating points controlled by spike-rate regularization.
 SCNN_RATE_VALUES = [0.06, 0.09, 0.12, 0.25, 0.50]
@@ -63,24 +78,25 @@ RATE_JOB_KEYS = [
     key for key in RATE_KEYS
     if key not in {"ann_lista", "ann_lstm"}
 ]
-SCNN_REFRESH_KEYS = [
+# Baselines.  Existing checkpoints can be re-evaluated with --eval-only.
+BASELINE_KEYS = [
+    "ann_lista", "ann_lstm",
     "scnn_dense", "scnn_aer",
     "scnn_rate_0p06", "scnn_rate_0p09",
     "scnn_rate_0p25", "scnn_rate_0p50",
 ]
-SLISTA_REFRESH_KEYS = [
+SLISTA_KEYS = [
     "slista_dense",
     "slista_aer",
     "slista_rate_0p02",
     "slista_rate_0p05",
-    "slista_rate_0p30",
     "slista_rate_0p20",
-    "slista_aer_hard_surrogate",
+    "slista_rate_0p30",
+    "slista_aer_fixed_tau",
     "slista_aer_no_rate",
     "slista_aer_no_semantic",
     "slista_dense_no_semantic",
 ]
-V3_REFRESH_KEYS = SCNN_REFRESH_KEYS + SEMANTIC_SNR_KEYS
 
 
 @dataclass(frozen=True)
@@ -96,15 +112,20 @@ class Experiment:
     alpha_rate: float
     semantic_weight: float
     tx_gradient: str = "temperature"
+    # Binary channels transmitted per frame; a dense sample carries
+    # channels * TIME_STEPS bits (bit-budget experiments vary it).
+    channels: int = 256
 
 
 def experiment_registry():
+    S = SpikingLISTA
+    tx_slista = Config.SLISTA_TX_THRESHOLD
+    sem = float(Config.SLISTA_SEMANTIC_WEIGHT)
     registry = {
         "slista_aer": Experiment(
-            "slista_aer", "S-LISTA", HybridLISTA, "spiking",
-            "block_aer_awgn_hard", None,
-            Config.SLISTA_TX_THRESHOLD, Config.SLISTA_DECODER_TAU,
-            SLISTA_SELECTED_RATE, 3.0,
+            "slista_aer", "S-LISTA", S, "spiking",
+            "block_aer_awgn_hard", None, tx_slista, None,
+            SLISTA_SELECTED_RATE, sem,
         ),
         "scnn_aer": Experiment(
             "scnn_aer", "Vanilla SNN", SpikingDenseRecon, "spiking",
@@ -121,10 +142,9 @@ def experiment_registry():
             "dense_q8_bitawgn_hard", 8, None, None, 1e-2, 3.0,
         ),
         "slista_dense": Experiment(
-            "slista_dense", "S-LISTA", HybridLISTA, "spiking",
-            "dense_spike_awgn_hard", None,
-            Config.SLISTA_TX_THRESHOLD, Config.SLISTA_DECODER_TAU,
-            0.0, 3.0,
+            "slista_dense", "S-LISTA", S, "spiking",
+            "dense_spike_awgn_hard", None, tx_slista, None,
+            0.0, sem,
         ),
         "scnn_dense": Experiment(
             "scnn_dense", "Vanilla SNN", SpikingDenseRecon, "spiking",
@@ -132,44 +152,45 @@ def experiment_registry():
             Config.SCNN_TX_THRESHOLD, Config.SCNN_DECODER_TAU,
             0.0, 3.0,
         ),
-        "slista_aer_hard_surrogate": Experiment(
-            "slista_aer_hard_surrogate", "S-LISTA", HybridLISTA, "spiking",
-            "block_aer_awgn_hard", None,
-            Config.SLISTA_TX_THRESHOLD, Config.SLISTA_DECODER_TAU,
-            SLISTA_SELECTED_RATE, 3.0, "hard_surrogate",
+        "slista_aer_fixed_tau": Experiment(
+            "slista_aer_fixed_tau", "S-LISTA", S, "spiking",
+            "block_aer_awgn_hard", None, tx_slista, None,
+            SLISTA_SELECTED_RATE, sem, "fixed_temperature",
         ),
         "slista_aer_no_rate": Experiment(
-            "slista_aer_no_rate", "S-LISTA", HybridLISTA, "spiking",
-            "block_aer_awgn_hard", None,
-            Config.SLISTA_TX_THRESHOLD, Config.SLISTA_DECODER_TAU,
-            0.0, 3.0,
+            "slista_aer_no_rate", "S-LISTA", S, "spiking",
+            "block_aer_awgn_hard", None, tx_slista, None,
+            0.0, sem,
         ),
         "slista_aer_no_semantic": Experiment(
-            "slista_aer_no_semantic", "S-LISTA", HybridLISTA, "spiking",
-            "block_aer_awgn_hard", None,
-            Config.SLISTA_TX_THRESHOLD, Config.SLISTA_DECODER_TAU,
+            "slista_aer_no_semantic", "S-LISTA", S, "spiking",
+            "block_aer_awgn_hard", None, tx_slista, None,
             SLISTA_SELECTED_RATE, 0.0,
         ),
         "slista_dense_no_semantic": Experiment(
-            "slista_dense_no_semantic", "S-LISTA", HybridLISTA, "spiking",
-            "dense_spike_awgn_hard", None,
-            Config.SLISTA_TX_THRESHOLD, Config.SLISTA_DECODER_TAU,
+            "slista_dense_no_semantic", "S-LISTA", S, "spiking",
+            "dense_spike_awgn_hard", None, tx_slista, None,
             0.0, 0.0,
         ),
     }
+    # Bit-budget points: dense transmission with fewer binary channels per
+    # frame; every other setting is that of slista_dense / scnn_dense.
+    for channels in BUDGET_CHANNELS:
+        for base, key in ((registry["slista_dense"], f"slista_dense_c{channels}"),
+                          (registry["scnn_dense"], f"scnn_dense_c{channels}")):
+            registry[key] = dataclasses.replace(base, key=key, channels=int(channels))
     for value in SLISTA_RATE_VALUES:
-        if np.isclose(value, 0.10):
+        if np.isclose(value, SLISTA_SELECTED_RATE):
             continue
         tag = f"{value:.2f}".replace(".", "p")
         key = f"slista_rate_{tag}"
         registry[key] = Experiment(
-            key, "S-LISTA", HybridLISTA, "spiking",
-            "block_aer_awgn_hard", None,
-            Config.SLISTA_TX_THRESHOLD, Config.SLISTA_DECODER_TAU,
-            float(value), 3.0,
+            key, "S-LISTA", S, "spiking",
+            "block_aer_awgn_hard", None, tx_slista, None,
+            float(value), sem,
         )
     for value in SCNN_RATE_VALUES:
-        if np.isclose(value, 0.12):
+        if np.isclose(value, SCNN_SELECTED_RATE):
             continue
         tag = f"{value:.2f}".replace(".", "p")
         key = f"scnn_rate_{tag}"
@@ -199,22 +220,21 @@ def atomic_csv(frame, path):
 
 def configure(experiment, seed):
     Config.SEED = int(seed)
+    Config.MEAS_DIM = Config.M = int(experiment.channels)
+    Config.RATE_BITS_PER_EVENT = max(1, math.ceil(math.log2(Config.MEAS_DIM)))
     Config.TRAIN_SNR_DB = TRAIN_SNR_DB
     Config.EVAL_SNR_DB_LIST = list(SNR_GRID)
     Config.ALPHA_SEMANTIC = float(experiment.semantic_weight)
-    if experiment.key == 'slista_aer_hard_surrogate':
-        source = Path(Config.RESULTS_DIR)/f'formal_point_{experiment.key}_seed{seed}.csv'
-        if source.is_file():
-            frame = pd.read_csv(source)
-            versions = frame.get('Ablation Version', pd.Series(dtype=str)).astype(str)
-            if versions.str.contains('tx_rx_rectangular').any():
-                Config._FULL_NO_TEMPERATURE = True
-    else:
-        Config._FULL_NO_TEMPERATURE = False
     Config.SEMANTIC_DETACH_BACKBONE = False
-    Config.TX_ABLATION_MODE = (
-        "hard_spike" if experiment.tx_gradient == "hard_surrogate" else "none"
-    )
+    # The temperature ablation only changes the TX annealing schedule.
+    Config.TX_ABLATION_MODE = "none"
+    if experiment.tx_gradient == "fixed_temperature":
+        Config.TAU_ANNEAL_TYPE = "fixed"
+        Config.TAU_FIXED = float(Config.TAU_FINAL)
+    elif experiment.tx_gradient == "temperature":
+        Config.TAU_ANNEAL_TYPE = "exp"
+    else:
+        raise ValueError(f"Unknown TX gradient setting: {experiment.tx_gradient}")
     Config.SLISTA_P_WEIGHT_DECAY = 0.0
     Config.DOWNSTREAM_LR_OVERRIDE = getattr(Config, "_CLI_CLASSIFIER_LR", 1e-3)
     Config.RECON_LR_OVERRIDE = getattr(Config, "_CLI_RECON_LR", None)
@@ -222,7 +242,8 @@ def configure(experiment, seed):
     Config.ANN_RX_MODE = "hard"
     if experiment.mode == "spiking":
         Config.SNN_TRANSPORT = experiment.transport
-        Config.DECODER_TAU = float(experiment.decoder_tau)
+        if experiment.decoder_tau is not None:
+            Config.DECODER_TAU = float(experiment.decoder_tau)
         if experiment.model_class is SpikingDenseRecon:
             Config.ALPHA_RATE_SCNN = float(experiment.alpha_rate)
         else:
@@ -232,6 +253,12 @@ def configure(experiment, seed):
 def experiment_hp(experiment, epochs=None):
     if experiment.key.startswith("slista_"):
         hp = dict(Config.SLISTA_PHASE3_CONFIG)
+        # One overall multiplier for the reconstruction path (P, G, eta,
+        # thresholds via their ratios, sensor and dictionary).  The task head
+        # keeps its own learning rate.
+        scale = float(Config.SLISTA_LR_SCALE)
+        for name in ("lr_lista_snn", "lr_sensor", "lr_dict"):
+            hp[name] = float(hp[name]) * scale
     elif experiment.key.startswith("scnn_"):
         hp = dict(Config.SCNN_PHASE3_CONFIG)
     else:
@@ -274,12 +301,13 @@ def build_components(experiment):
 
 
 def experiment_artifact_key(experiment):
-    if getattr(Config, "_FULL_NO_TEMPERATURE", False) and experiment.key == "slista_aer_hard_surrogate":
-        return f"{experiment.key}_txrx_rect_v1"
+    # Tags used in checkpoint and result file names.
     if experiment.model_class is SpikingDenseRecon:
         return f"{experiment.key}_compact3x700_tx1p5_nth0p8_leak0p06_stau0p3_lr6em4"
-    if experiment.key.startswith("slista_"):
-        return f"{experiment.key}_tx1_nth0p65_leak0p5_stau0p7_lr1em3"
+    if experiment.model_class is SpikingLISTA:
+        # S-LISTA hyperparameters are recorded inside the checkpoint and in
+        # every result row.
+        return experiment.key
     return experiment.key
 
 
@@ -311,10 +339,8 @@ def recon_checkpoint_path(experiment, seed, model=None):
 
 def classifier_checkpoint_path(experiment, seed):
     tag = experiment_artifact_key(experiment)
-    if getattr(Config, '_FULL_NO_TEMPERATURE', False):
-        tag += '_txrx_rect'
     return os.path.join(Config.RESULTS_DIR,
-        f'downstream_recon_x_{tag}_seed{seed}_gn32_w384_default_lr1em3_min1em7_ep150.pth')
+        f'downstream_recon_x_{tag}_seed{seed}_{Config.classifier_protocol()}.pth')
 
 
 def point_path(experiment, seed):
@@ -335,6 +361,8 @@ def attach_downstream_classifier(trainer, experiment, seed):
         frame_dim=Config.DOWNSTREAM_TCN_DIM,
         dropout=Config.DOWNSTREAM_DROPOUT,
         norm_groups=Config.DOWNSTREAM_NORM_GROUPS,
+        channel_pool=Config.DOWNSTREAM_CHANNEL_POOL,
+        log_input=Config.DOWNSTREAM_LOG_INPUT,
     ).to(Config.DEVICE)
     trainer.set_downstream_classifier(classifier)
     return classifier
@@ -358,29 +386,60 @@ def resolve_existing_recon(recorded):
     return candidates[0]
 
 
+# Values assumed for S-LISTA settings that a checkpoint does not record.
+SLISTA_UNRECORDED_DEFAULTS = {
+    "SLISTA_TX_THRESHOLD": 0.75, "SLISTA_SEMANTIC_WEIGHT": 3.0,
+    "SLISTA_WEIGHT_DECAY_P": 0.0, "SLISTA_WEIGHT_DECAY_G": 0.0,
+}
+
+
+def slista_settings_mismatch(path):
+    """For an S-LISTA checkpoint, the settings that differ from the current
+    configuration ({} if they match or the file is not an S-LISTA model)."""
+    if not os.path.isfile(path):
+        return {}
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    info = checkpoint.get("slista")
+    if not info:
+        return {}
+    stored = dict(SLISTA_UNRECORDED_DEFAULTS, **(info.get("settings") or {}))
+    current = Config.slista_settings()
+    return {name: (stored.get(name), value) for name, value in current.items()
+            if stored.get(name) is None or abs(float(stored[name]) - value) > 1e-12}
+
+
 def train_or_load(experiment, seed, args, train_loader, val_loader):
     configure(experiment, seed)
     recorded_recon = None
     source_csv = Path(point_path(experiment, seed))
-    if source_csv.is_file():
+    if source_csv.is_file() and not args.force_retrain:
         frame = pd.read_csv(source_csv)
         paths = frame['Recon Checkpoint'].dropna().unique()
         if len(paths) != 1:
             raise RuntimeError(f'Ambiguous reconstruction provenance: {source_csv}')
         recorded_recon = resolve_existing_recon(paths[0])
-        if experiment.key == 'slista_aer_hard_surrogate':
-            versions = frame.get('Ablation Version', pd.Series(dtype=str)).astype(str)
-            if versions.str.contains('tx_rx_rectangular').any() or 'txrx_rect' in str(recorded_recon):
-                Config._FULL_NO_TEMPERATURE = True
     set_seed(seed)
     model, sensor, channel = build_components(experiment)
     trainer = Trainer(model, sensor, channel, train_loader, val_loader)
+    # With --force-retrain the recorded path is ignored, so the freshly
+    # trained checkpoint (not an older file) is the one loaded below.
     recon_path = str(recorded_recon) if recorded_recon else recon_checkpoint_path(experiment, seed, model)
     if args.force_retrain_classifier and not os.path.isfile(recon_path):
         raise FileNotFoundError(f'Classifier refresh requires an existing reconstruction: {recon_path}')
-    if args.force_retrain or not os.path.exists(recon_path):
+    retrained_recon = False
+    stale = slista_settings_mismatch(recon_path) if not args.force_retrain else {}
+    if stale:
+        print(f"[Stale S-LISTA checkpoint] {recon_path} was trained with other settings "
+              f"(stored, current): {stale}; retraining", flush=True)
+        if args.eval_only:
+            raise RuntimeError(f"Stale S-LISTA checkpoint in --eval-only: {recon_path}")
+        recon_path = recon_checkpoint_path(experiment, seed, model)
+    if args.force_retrain or stale or not os.path.exists(recon_path):
         if args.eval_only:
             raise FileNotFoundError(recon_path)
+        if getattr(args, "classifier_only", False):
+            raise RuntimeError(f"--classifier-only: {experiment.key} seed{seed} would retrain "
+                               f"its reconstruction model ({recon_path}; stale settings: {stale})")
         trainer.train_dynamic_recon(
             hp=experiment_hp(experiment, args.epochs),
             model_name=recon_model_name(experiment, seed),
@@ -388,6 +447,11 @@ def train_or_load(experiment, seed, args, train_loader, val_loader):
             freeze_sensor=False,
             alpha_rate=experiment.alpha_rate,
         )
+        retrained_recon = True
+        if not os.path.isfile(recon_path):
+            raise FileNotFoundError(
+                f'Training did not write the expected checkpoint: {recon_path}'
+            )
     checkpoint = torch.load(
         recon_path, map_location=Config.DEVICE, weights_only=False
     )
@@ -400,7 +464,11 @@ def train_or_load(experiment, seed, args, train_loader, val_loader):
 
     classifier = attach_downstream_classifier(trainer, experiment, seed)
     classifier_path = classifier_checkpoint_path(experiment, seed)
-    if args.force_retrain_classifier or not os.path.exists(classifier_path):
+    # A classifier trained on an older reconstruction model is never reused.
+    if (
+        args.force_retrain_classifier or retrained_recon
+        or not os.path.exists(classifier_path)
+    ):
         if args.eval_only:
             raise FileNotFoundError(classifier_path)
         hp = dict(Config.PHASE4_CONFIG)
@@ -450,9 +518,28 @@ def save_z_features(trainer, experiment, seed):
     )
 
 
-def evaluate_grid(trainer, experiment, checkpoint, seed, repeats):
+def slista_columns(checkpoint):
+    """Provenance of an S-LISTA checkpoint (empty for other models)."""
+    info = checkpoint.get("slista") if isinstance(checkpoint, dict) else None
+    if not info:
+        return {}
+    columns = {f"S-LISTA {name}": value for name, value in info["settings"].items()}
+    calibration = info.get("calibration") or {}
+    columns["S-LISTA Calibration Sigma"] = calibration.get("sigma", np.nan)
+    columns["S-LISTA Active Frame Fraction"] = calibration.get(
+        "active_frame_fraction", np.nan
+    )
+    columns["TAU Anneal Type"] = checkpoint.get("tau_anneal_type", "")
+    return columns
+
+
+def evaluate_grid(trainer, experiment, checkpoint, seed, repeats,
+                  recon_path=None, classifier_path=None):
     trainer.channel.set_snr_db(TRAIN_SNR_DB)
     bits = trainer.evaluate_bits(mode=experiment.mode)
+    extra = slista_columns(checkpoint)
+    if trainer._is_spiking_lista():
+        extra.update(trainer.slista_diagnostics(mode=experiment.mode))
     parameter_counts = utils.count_reconstruction_parameters(
         trainer.model, trainer.sensor, mode=experiment.mode
     )
@@ -507,15 +594,17 @@ def evaluate_grid(trainer, experiment, checkpoint, seed, repeats):
             "Noise Sigma": float(sigma),
             "Theoretical BER": float(ber),
             "Selected Epoch": int(checkpoint["epoch"]),
-            "Recon Checkpoint": recon_checkpoint_path(
-                experiment, seed, trainer.model
+            # The files actually loaded.
+            "Recon Checkpoint": str(
+                recon_path or recon_checkpoint_path(experiment, seed)
             ),
-            "Classifier Checkpoint": classifier_checkpoint_path(
-                experiment, seed
+            "Classifier Checkpoint": str(
+                classifier_path or classifier_checkpoint_path(experiment, seed)
             ),
             "Code Version": Config.CODE_VERSION,
         }
         row.update(parameter_counts)
+        row.update(extra)
         rows.append(row)
     Config.EVAL_CHANNEL_SEED = original_channel_seed
     trainer.channel.set_snr_db(TRAIN_SNR_DB)
@@ -526,22 +615,187 @@ def run_one(args):
     registry = experiment_registry()
     experiment = registry[args.experiment]
     train_loader, val_loader = utils.get_dataloaders(Config.BATCH_SIZE_RECON)
-    trainer, checkpoint, _, _ = train_or_load(
+    trainer, checkpoint, recon_path, classifier_path = train_or_load(
         experiment, args.seed, args, train_loader, val_loader
     )
     rows = evaluate_grid(
-        trainer, experiment, checkpoint, args.seed, args.noise_repeats
+        trainer, experiment, checkpoint, args.seed, args.noise_repeats,
+        recon_path=recon_path, classifier_path=classifier_path,
     )
     result = pd.DataFrame(rows)
-    result['Classifier Protocol'] = 'gn32_w384_default_lr1em3_min1em7_ep150'
-    if getattr(Config, '_FULL_NO_TEMPERATURE', False):
-        result['Ablation Version'] = NO_TEMP_VERSION
-        result['Ablation Label'] = 'Without temperature relaxation'
+    result['Classifier Protocol'] = Config.classifier_protocol()
+    if experiment.key in CORE_VARIANTS:
+        result['Ablation Label'] = CORE_VARIANTS[experiment.key]
     atomic_csv(result, point_path(experiment, args.seed))
     save_z_features(trainer, experiment, args.seed)
     print(
         f"[Done] {experiment.key} | seed={args.seed} | "
         f"{point_path(experiment, args.seed)}",
+        flush=True,
+    )
+
+
+def recon_point_path(experiment, seed):
+    return os.path.join(
+        Config.RESULTS_DIR,
+        f"recon_point_{experiment.key}_seed{int(seed)}.csv",
+    )
+
+
+# Robustness summary: the low-SNR AWGN band (where the
+# AWGN curves bend) and the full Rayleigh grid.
+ROBUST_AWGN_BAND = [snr for snr in SNR_GRID if snr <= 5]
+
+
+def robustness_metrics(trainer, experiment, downstream=False):
+    """NMSE and joint task-head accuracy over the full AWGN and quasi-static
+    Rayleigh grids, with the same fixed noise/fading realisations as the
+    formal evaluations (evaluate_grid / evaluate_rayleigh)."""
+    from wireless_channel import FrozenRayleighChannel
+    mode = experiment.mode
+    original = trainer.channel
+    original_seed = int(Config.EVAL_CHANNEL_SEED)
+    curves = {"AWGN": {}, "Rayleigh": {}}
+    downstream_acc = {"AWGN": {}, "Rayleigh": {}}
+    try:
+        for snr in SNR_GRID:
+            original.set_snr_db(float(snr))
+            joint = trainer.validate_joint_metrics(mode=mode)
+            curves["AWGN"][snr] = (joint["Temporal-Mean NMSE (dB)"], joint["Joint Accuracy"])
+            if downstream:
+                # Same protocol as evaluate_grid (deterministic AWGN draw).
+                downstream_acc["AWGN"][snr] = trainer.validate_cls(mode=mode, target="recon")
+        fading = FrozenRayleighChannel(20.0, experiment.transport).to(Config.DEVICE)
+        trainer.channel = fading
+        for snr in SNR_GRID:
+            fading.set_snr_db(float(snr))
+            fading.reset_rng(original_seed)
+            joint = trainer.validate_joint_metrics(mode=mode)
+            curves["Rayleigh"][snr] = (joint["Temporal-Mean NMSE (dB)"], joint["Joint Accuracy"])
+            if downstream:
+                # Same protocol as evaluate_rayleigh (fades/bit errors reset).
+                fading.eval()
+                fading.reset_rng(original_seed)
+                downstream_acc["Rayleigh"][snr] = trainer.validate_cls(mode=mode, target="recon")
+    finally:
+        trainer.channel = original
+        original.set_snr_db(TRAIN_SNR_DB)
+        Config.EVAL_CHANNEL_SEED = original_seed
+    result = {}
+    for channel, curve in curves.items():
+        for snr, (nmse, head_acc) in curve.items():
+            result[f"{channel} NMSE @{snr:g}"] = float(nmse)
+            result[f"{channel} Head Acc @{snr:g}"] = float(head_acc)
+    low = [curves["AWGN"][snr] for snr in ROBUST_AWGN_BAND]
+    fade = list(curves["Rayleigh"].values())
+    result["AWGN Low NMSE (dB)"] = float(np.mean([v[0] for v in low]))
+    result["Rayleigh Mean NMSE (dB)"] = float(np.mean([v[0] for v in fade]))
+    result["Robust NMSE (dB)"] = float(np.mean([v[0] for v in low + fade]))
+    result["AWGN Low Head Acc (%)"] = float(np.mean([v[1] for v in low]))
+    result["Rayleigh Mean Head Acc (%)"] = float(np.mean([v[1] for v in fade]))
+    result["Robust Head Acc (%)"] = float(np.mean([v[1] for v in low + fade]))
+    if downstream:
+        for channel, curve in downstream_acc.items():
+            for snr, value in curve.items():
+                result[f"{channel} Acc @{snr:g}"] = float(value)
+        low_acc = [downstream_acc["AWGN"][snr] for snr in ROBUST_AWGN_BAND]
+        fade_acc = list(downstream_acc["Rayleigh"].values())
+        result["AWGN Low Acc (%)"] = float(np.mean(low_acc))
+        result["Rayleigh Mean Acc (%)"] = float(np.mean(fade_acc))
+        result["Robust Acc (%)"] = float(np.mean(low_acc + fade_acc))
+    return result
+
+
+def run_recon_only(args):
+    """Train (or load) the reconstruction model only and evaluate it on the
+    evaluation split: AWGN 10 dB (training channel), S-LISTA diagnostics and
+    the robustness grids.  The downstream classifier is not
+    trained, the jointly trained task head provides an accuracy proxy.  If
+    the checkpoint already exists, nothing is retrained (re-evaluation only)."""
+    experiment = experiment_registry()[args.experiment]
+    train_loader, val_loader = utils.get_dataloaders(Config.BATCH_SIZE_RECON)
+    configure(experiment, args.seed)
+    set_seed(args.seed)
+    model, sensor, channel = build_components(experiment)
+    trainer = Trainer(model, sensor, channel, train_loader, val_loader)
+    recon_path = recon_checkpoint_path(experiment, args.seed, model)
+    point = recon_point_path(experiment, args.seed)
+    previous = pd.read_csv(point).iloc[0].to_dict() if os.path.isfile(point) else {}
+    started = time.time()
+    trained = False
+    if args.force_retrain or not os.path.exists(recon_path):
+        if getattr(args, "classifier_only", False):
+            raise RuntimeError(f"--classifier-only: {experiment.key} seed{args.seed} would retrain "
+                               f"its reconstruction model ({recon_path})")
+        trainer.train_dynamic_recon(
+            hp=experiment_hp(experiment, args.epochs),
+            model_name=recon_model_name(experiment, args.seed),
+            mode=experiment.mode,
+            freeze_sensor=False,
+            alpha_rate=experiment.alpha_rate,
+        )
+        trained = True
+    train_minutes = (
+        (time.time() - started) / 60.0 if trained
+        else float(previous.get("Train Minutes", np.nan))
+    )
+    checkpoint = torch.load(recon_path, map_location=Config.DEVICE, weights_only=False)
+    model.load_state_dict(checkpoint["model"], strict=True)
+    sensor.load_state_dict(checkpoint["sensor"], strict=True)
+    channel.set_snr_db(TRAIN_SNR_DB)
+    joint = trainer.validate_joint_metrics(mode=experiment.mode)
+    bits = trainer.evaluate_bits(mode=experiment.mode)
+    row = {
+        "Experiment Key": experiment.key,
+        "Seed": int(args.seed),
+        "Epochs": int(experiment_hp(experiment, args.epochs)["epochs"]),
+        "Selected Epoch": int(checkpoint["epoch"]),
+        "TX Threshold": float(experiment.encoder_threshold),
+        "Mean NMSE (dB)": float(joint["Temporal-Mean NMSE (dB)"]),
+        "Full-Sequence NMSE (dB)": float(joint["Full-Sequence NMSE (dB)"]),
+        "Framewise Mean NMSE (dB)": float(joint["Framewise Mean NMSE (dB)"]),
+        "Task Head Accuracy (%)": float(joint["Joint Accuracy"]),
+        "Bits/Sample": float(bits["bits_per_sample"]),
+        "Tx Firing Rate": float(bits["measurements"]) / float(Config.MEAS_DIM * Config.TIME_STEPS),
+        "Train Minutes": train_minutes,
+        "Recon Checkpoint": str(recon_path),
+        "Code Version": Config.CODE_VERSION,
+    }
+    row.update(slista_columns(checkpoint))
+    if trainer._is_spiking_lista():
+        row.update(trainer.slista_diagnostics(mode=experiment.mode))
+    if args.downstream:
+        # Downstream classifier on reconstructed x, exactly as in the formal
+        # protocol (frozen sensor/reconstruction, AWGN 10 dB, 150 epochs).
+        for module in (model, sensor):
+            module.eval()
+            module.requires_grad_(False)
+        classifier = attach_downstream_classifier(trainer, experiment, args.seed)
+        classifier_path = classifier_checkpoint_path(experiment, args.seed)
+        if trained or args.force_retrain_classifier or not os.path.exists(classifier_path):
+            hp = dict(Config.PHASE4_CONFIG)
+            if args.epochs is not None:
+                hp["epochs"] = int(args.epochs)
+            trainer.train_phase4(
+                hp=hp, model_name=recon_model_name(experiment, args.seed),
+                mode=experiment.mode, target="recon", save_path=classifier_path,
+            )
+        state = torch.load(classifier_path, map_location=Config.DEVICE, weights_only=False)
+        classifier.load_state_dict(state["classifier"], strict=True)
+        classifier.eval()
+        channel.set_snr_db(TRAIN_SNR_DB)
+        row["Accuracy (%)"] = float(trainer.validate_cls(mode=experiment.mode, target="recon"))
+        row["Classifier Checkpoint"] = str(classifier_path)
+    started = time.time()
+    row.update(robustness_metrics(trainer, experiment, downstream=args.downstream))
+    row["Robustness Eval Minutes"] = (time.time() - started) / 60.0
+    atomic_csv(pd.DataFrame([row]), point)
+    print(
+        f"[Recon-only] {experiment.key} seed={args.seed}: "
+        f"AWGN10 {row['Mean NMSE (dB)']:.3f} dB | robust "
+        f"{row['Robust NMSE (dB)']:.3f} dB | Rayleigh mean "
+        f"{row['Rayleigh Mean NMSE (dB)']:.3f} dB | head acc "
+        f"{row['Task Head Accuracy (%)']:.2f}% | {point}",
         flush=True,
     )
 
@@ -556,8 +810,11 @@ def read_points():
     if not frames:
         return pd.DataFrame()
     raw = pd.concat(frames, ignore_index=True)
-    if not raw['Classifier Checkpoint'].astype(str).str.contains('gn32_w384', regex=False).all():
-        raise RuntimeError('Formal points still contain old classifiers; finish all classification jobs before summary.')
+    if not raw['Classifier Checkpoint'].astype(str).str.contains(Config.classifier_protocol(), regex=False).all():
+        stale = sorted(raw.loc[~raw['Classifier Checkpoint'].astype(str).str.contains(
+            Config.classifier_protocol(), regex=False), 'Experiment Key'].unique())
+        raise RuntimeError(f'Formal points still use another classifier protocol than '
+                           f'{Config.classifier_protocol()} ({stale}); finish all classification jobs before summary.')
     raw.loc[
         raw["Display Model"].isin(
             ["Spiking CNN", "Generic SNN", "SCNN"]
@@ -630,13 +887,7 @@ def summarize():
     )
     save_subset(raw, SNR_KEYS, "snr_robustness")
     save_subset(
-        raw, CORE_KEYS, "core_ablation",
-        {
-            "slista_aer": "Proposed",
-            "slista_aer_hard_surrogate": "Hard surrogate",
-            "slista_aer_no_rate": "No rate regularization",
-            "slista_aer_no_semantic": "No semantic supervision",
-        },
+        raw, CORE_KEYS, "core_ablation", CORE_VARIANTS,
     )
     save_subset(
         raw, SEMANTIC_SNR_KEYS, "semantic_snr_robustness",
@@ -678,15 +929,14 @@ class OperationCounter:
 def attach_operation_hooks(counter, experiment, model, sensor):
     if experiment.mode == "ann":
         counter.add(sensor.fc, "MAC", "sender")
-    if experiment.key.startswith("slista"):
-        if experiment.mode == "spiking":
-            counter.add(model.P_snn, "AC", "reconstruction")
-            for layer in list(model.PD_snn_k)[1:]:
-                counter.add(layer, "AC", "reconstruction")
-        else:
-            counter.add(model.W_e, "MAC", "reconstruction")
-            for layer in list(model.S_k)[1:]:
-                counter.add(layer, "MAC", "reconstruction")
+    if isinstance(model, SpikingLISTA):
+        # P on binary received spikes and all L-1 G matrices on integer
+        # codes are ACs (n per unit of input magnitude).  The readout MAC
+        # (eta on the gated support) is added from the trace in
+        # collect_analysis.
+        counter.add(model.P, "AC", "reconstruction")
+        for layer in model.G:
+            counter.add(layer, "AC", "reconstruction")
     elif experiment.key == "ann_lista":
         counter.add(model.W_e, "MAC", "reconstruction")
         for layer in list(model.S_k)[1:]:
@@ -699,11 +949,25 @@ def attach_operation_hooks(counter, experiment, model, sensor):
             counter.add(block.fc2, "AC", "reconstruction")
 
 
+def recorded_checkpoints(experiment, seed):
+    """Checkpoint files recorded in the AWGN result of this run, if any."""
+    source = Path(point_path(experiment, seed))
+    if not source.is_file():
+        return recon_checkpoint_path(experiment, seed), classifier_checkpoint_path(experiment, seed)
+    frame = pd.read_csv(source)
+    recon = frame["Recon Checkpoint"].dropna().unique()
+    head = frame["Classifier Checkpoint"].dropna().unique()
+    if len(recon) != 1 or len(head) != 1:
+        raise RuntimeError(f"Ambiguous checkpoint provenance: {source}")
+    return str(resolve_existing_recon(recon[0])), str(head[0])
+
+
 def load_for_analysis(experiment, seed, loader):
     configure(experiment, seed)
     model, sensor, channel = build_components(experiment)
+    recon_file, classifier_file = recorded_checkpoints(experiment, seed)
     recon = torch.load(
-        recon_checkpoint_path(experiment, seed, model),
+        recon_file,
         map_location=Config.DEVICE,
         weights_only=False,
     )
@@ -712,7 +976,7 @@ def load_for_analysis(experiment, seed, loader):
     trainer = Trainer(model, sensor, channel, loader, loader)
     classifier = attach_downstream_classifier(trainer, experiment, seed)
     state = torch.load(
-        classifier_checkpoint_path(experiment, seed),
+        classifier_file,
         map_location=Config.DEVICE,
         weights_only=False,
     )
@@ -779,6 +1043,10 @@ def collect_analysis(seed, max_batches=0):
                     reconstructed, _, model_states, _ = trainer.model(
                         received, states=model_states
                     )
+                    if isinstance(trainer.model, SpikingLISTA):
+                        counter.counts["reconstruction"]["MAC"] += float(
+                            trainer.model.last_trace["mask"].sum().item()
+                        )
                     recon_sequence.append(reconstructed)
                 reconstructed = torch.stack(recon_sequence, dim=1)
                 predictions = trainer.downstream_classifier(
@@ -915,7 +1183,7 @@ def rayleigh_sources():
             frame = frame[np.isclose(frame["Eval SNR (dB)"], 10)].copy()
             if len(frame) != 1 or not frame["Experiment Key"].eq(key).all() or not frame["Seed"].eq(seed).all():
                 raise ValueError(f"Invalid AWGN10 source row: {path}")
-            if not frame['Classifier Checkpoint'].astype(str).str.contains('gn32_w384', regex=False).all():
+            if not frame['Classifier Checkpoint'].astype(str).str.contains(Config.classifier_protocol(), regex=False).all():
                 raise ValueError(f"Old classifier source: {path}")
             frame["Source CSV"] = str(path.resolve())
             selected.append(frame)
@@ -938,8 +1206,10 @@ def rayleigh_sources():
 
 
 def resolved_weights(row):
-    if 'gn32_w384' not in str(row['Classifier Checkpoint']):
-        raise RuntimeError('Old classifier result: rerun formal classification before Rayleigh evaluation.')
+    if Config.classifier_protocol() not in str(row['Classifier Checkpoint']):
+        raise RuntimeError(f"Old classifier result for {row['Experiment Key']} seed{row['Seed']} "
+                           f"(expected protocol {Config.classifier_protocol()}): "
+                           "rerun formal classification before Rayleigh evaluation.")
     resolved = []
     for field in ("Recon Checkpoint", "Classifier Checkpoint"):
         path = Path(str(row[field]))
@@ -977,8 +1247,15 @@ def rayleigh_path(key, seed):
     return Path(Config.RESULTS_DIR) / "rayleigh_frozen" / f"rayleigh_{key}_seed{int(seed)}.csv"
 
 
+def rayleigh_grid(key):
+    """Frozen-Rayleigh SNR points of a key: the full grid for the robustness
+    keys and for the AER rate points, whose
+    performance-bit trade-off is also reported at low SNR."""
+    return SNR_GRID if key in SNR_KEYS or key in RATE_JOB_KEYS else [20.0]
+
+
 def valid_rayleigh(frame, key, seed):
-    grid = SNR_GRID if key in SNR_KEYS else [20.0]
+    grid = rayleigh_grid(key)
     required = {"Experiment Key", "Seed", "Evaluation Channel", "Eval SNR (dB)",
                 "Code Version", "Mean NMSE (dB)", "Accuracy (%)", "Bits/Sample"}
     return (required.issubset(frame.columns) and len(frame) == len(grid)
@@ -1016,7 +1293,7 @@ def evaluate_rayleigh(args):
     model.eval(); sensor.eval(); classifier.eval(); channel.eval()
     bits = trainer.evaluate_bits(mode=experiment.mode)
     rows = []
-    for snr in (SNR_GRID if args.experiment in SNR_KEYS else [20.0]):
+    for snr in rayleigh_grid(args.experiment):
         channel.set_snr_db(snr)
         channel.reset_rng(Config.EVAL_CHANNEL_SEED)
         joint = trainer.validate_joint_metrics(mode=experiment.mode)
@@ -1053,9 +1330,13 @@ def summarize_rayleigh():
             raise ValueError(f"Invalid/incomplete Rayleigh result: {key} seed{seed}")
         frames.append(frame)
     raw = pd.concat(frames, ignore_index=True)
-    for keys, name in ((SNR_KEYS, "snr_robustness_rayleigh_per_seed.csv"),
-                       (RATE_JOB_KEYS, "performance_bit_rayleigh20_per_seed.csv")):
-        atomic_csv(raw[raw["Experiment Key"].isin(keys)], os.path.join(Config.RESULTS_DIR, name))
+    atomic_csv(raw[raw["Experiment Key"].isin(SNR_KEYS)],
+               os.path.join(Config.RESULTS_DIR, "snr_robustness_rayleigh_per_seed.csv"))
+    rate = raw[raw["Experiment Key"].isin(RATE_JOB_KEYS)]
+    atomic_csv(rate[np.isclose(rate["Eval SNR (dB)"], 20)],
+               os.path.join(Config.RESULTS_DIR, "performance_bit_rayleigh20_per_seed.csv"))
+    # All SNR points of the AER rate keys (performance-bit trade-off at low SNR).
+    atomic_csv(rate, os.path.join(Config.RESULTS_DIR, "performance_bit_rayleigh_per_seed.csv"))
     main = raw[raw["Experiment Key"].isin(SNR_KEYS) & np.isclose(raw["Eval SNR (dB)"], 20)]
     atomic_csv(main, os.path.join(Config.RESULTS_DIR, "main_rayleigh20_per_seed.csv"))
     print(f"[Rayleigh summary] {Config.RESULTS_DIR}")
@@ -1270,7 +1551,7 @@ def dispatch_paper_rayleigh(args):
     with ThreadPoolExecutor(max_workers=len(set(args.gpus))) as pool:
         failures=[x for batch in pool.map(work,dict.fromkeys(args.gpus)) for x in batch]
     if failures:raise RuntimeError('Failed paper evaluation:\n'+'\n'.join(failures))
-    variants=dict(zip(CORE_KEYS,['S-LISTA with AER','Hard surrogate','No rate regularization','No semantic supervision']))
+    variants=dict(CORE_VARIANTS)
     core=[];semantic=[]
     for key,seed in jobs:
         f=pd.read_csv(folder/f'paper_{key}_seed{seed}.csv')
@@ -1293,168 +1574,14 @@ def dispatch_paper_rayleigh(args):
 
 
 
-NO_TEMP_VERSION = "shd_tx_rx_rectangular_v1_cls_gn32_w384_lr1em3_min1em7_ep150"
-NO_TEMP_KEY = "slista_aer_hard_surrogate"
-
-
-def no_temp_root(args):
-    return (args.paper_source_results or
-            Path(Config.RESULTS_DIR)).resolve()
-
-
-def no_temp_worker(args):
-    import snn_models
-    if getattr(snn_models, 'SHD_FULL_NO_TEMPERATURE_VERSION', None) != 1:
-        raise RuntimeError('Install the accompanying snn_models.py first')
-    base = no_temp_root(args)
-    work = base / 'retrain_without_temperature_v1'
-    work.mkdir(parents=True, exist_ok=True)
-    Config.RESULTS_DIR = str(work)
-    Config._FULL_NO_TEMPERATURE = True
-    Config._CLI_CLASSIFIER_LR = 1e-3
-    Config._CLI_RECON_LR = None
-    Config._CLI_EVAL_10_ONLY = True
-    Config.PHASE4_CONFIG = dict(Config.PHASE4_CONFIG,
-                               epochs=150, lr=1e-3, lr_min=1e-7)
-    args.experiment = NO_TEMP_KEY
-    args.epochs = None  # Keep reconstruction epochs; phase 4 alone uses 150.
-    args.noise_repeats = 1
-    args.eval_only = False
-    args.force_retrain = False
-    args.force_retrain_classifier = False
-    args.paper_analysis_seed = -1
-    marker = work / f'complete_seed{args.seed}.json'
-    ray_path = work / 'rayleigh_paper' / f'paper_{NO_TEMP_KEY}_seed{args.seed}.csv'
-    if marker.exists() and ray_path.exists():
-        import json
-        if json.loads(marker.read_text()).get('version') == NO_TEMP_VERSION:
-            print(f'[Already complete] seed{args.seed}', flush=True)
-            return
-    print(f'[Full temperature ablation] seed{args.seed}; TX and RX rectangular; '
-          'AWGN10 training; classifier default init, lr=0.001, min=1e-7, epochs=150', flush=True)
-    run_one(args)
-    point = work / f'formal_point_{NO_TEMP_KEY}_seed{args.seed}.csv'
-    frame = pd.read_csv(point)
-    for name, value in {'Ablation Version': NO_TEMP_VERSION,
-                        'Ablation Label': 'Without temperature relaxation',
-                        'Decoder Gradient': 'rectangular', 'Classifier Init': 'default',
-                        'Classifier LR': 1e-3, 'Classifier Min LR': 1e-7,
-                        'Classifier Epochs': 150}.items():
-        frame[name] = value
-    atomic_csv(frame, str(point))
-    run_paper_rayleigh(args)
-    import json
-    marker.write_text(json.dumps({'version': NO_TEMP_VERSION, 'seed': args.seed}))
-
-
-def merge_no_temp_results(base):
-    import shutil
-    from datetime import datetime, timezone
-    work = base / 'retrain_without_temperature_v1'
-    ray_frames, awgn_frames = [], []
-    files = []
-    for seed in range(42, 47):
-        for rel, collection in [
-            (Path(f'formal_point_{NO_TEMP_KEY}_seed{seed}.csv'), awgn_frames),
-            (Path('rayleigh_paper') / f'paper_{NO_TEMP_KEY}_seed{seed}.csv', ray_frames),
-        ]:
-            src = work / rel
-            f = pd.read_csv(src)
-            if (len(f) != 1 or not f['Experiment Key'].eq(NO_TEMP_KEY).all()
-                or not f['Seed'].eq(seed).all()
-                or not f['Ablation Version'].eq(NO_TEMP_VERSION).all()):
-                raise ValueError(f'Wrong corrected result: {src}')
-            expected_snr = 20 if collection is ray_frames else 10
-            if not np.isclose(f['Eval SNR (dB)'], expected_snr).all():
-                raise ValueError(f'Wrong evaluation SNR: {src}')
-            values = f[['Mean NMSE (dB)', 'Accuracy (%)', 'Bits/Sample']].to_numpy(float)
-            if not np.isfinite(values).all() or not f['Accuracy (%)'].between(0,100).all():
-                raise ValueError(f'Invalid metrics: {src}')
-            for field in ['Recon Checkpoint', 'Classifier Checkpoint']:
-                if not Path(f.iloc[0][field]).is_file():
-                    raise FileNotFoundError(f.iloc[0][field])
-            f['Variant'] = 'Without temperature relaxation'
-            collection.append(f)
-            files.append((src, base / rel))
-    # Prepare every replacement before touching the published result files.
-    replacements = []
-    for rel, new_frames in [('rayleigh_paper/core_ablation_per_seed.csv', ray_frames),
-                            ('core_ablation_per_seed.csv', awgn_frames)]:
-        target = base / rel
-        if not target.exists():
-            if rel.startswith('rayleigh_paper'):
-                raise FileNotFoundError(target)
-            continue
-        old = pd.read_csv(target)
-        kept = old.loc[~old['Experiment Key'].eq(NO_TEMP_KEY)].copy()
-        replacements.append((target, pd.concat([kept, *new_frames], ignore_index=True)))
-    backup = base / 'ablation_backups' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    backup.mkdir(parents=True)
-    for _, dst in files:
-        if dst.exists():
-            dest = backup / dst.relative_to(base)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(dst, dest)
-    for dst, _ in replacements:
-        dest = backup / dst.relative_to(base)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(dst, dest)
-    for src, dst in files:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        atomic_csv(pd.read_csv(src), str(dst))
-    for dst, frame in replacements:
-        atomic_csv(frame, str(dst))
-    print(f'[Updated] {base / "rayleigh_paper/core_ablation_per_seed.csv"}', flush=True)
-    print(f'[Backup] {backup}', flush=True)
-
-
-def dispatch_no_temp(args):
-    import queue
-    import subprocess
-    import sys
-    from concurrent.futures import ThreadPoolExecutor
-    base = no_temp_root(args)
-    if not (base / 'rayleigh_paper/core_ablation_per_seed.csv').is_file():
-        raise FileNotFoundError(base / 'rayleigh_paper/core_ablation_per_seed.csv')
-    if args.epochs is not None or args.recon_lr is not None or args.classifier_lr is not None:
-        raise ValueError('This workflow fixes classifier settings and preserves reconstruction settings; omit LR/epoch overrides')
-    gpus = list(dict.fromkeys(args.gpus))
-    if not gpus or any(g < 0 or g >= torch.cuda.device_count() for g in gpus):
-        raise ValueError(f'Unavailable GPU(s): {gpus}')
-    tasks = queue.Queue()
-    for seed in range(42, 47): tasks.put(seed)
-    logs = base / 'retrain_without_temperature_v1/logs'
-    logs.mkdir(parents=True, exist_ok=True)
-    def worker(gpu):
-        failures = []
-        while True:
-            try: seed = tasks.get_nowait()
-            except queue.Empty: return failures
-            log = logs / f'seed{seed}_gpu{gpu}.log'
-            cmd = [sys.executable, '-u', str(Path(__file__).resolve()),
-                   '--without-temperature-one', '--seed', str(seed), '--gpu', str(gpu),
-                   '--paper-source-results', str(base)]
-            print(f'[START] GPU {gpu} seed{seed}: {log}', flush=True)
-            with log.open('w') as stream:
-                result = subprocess.run(cmd, stdout=stream, stderr=subprocess.STDOUT)
-            print(f'[{"DONE" if result.returncode == 0 else "FAIL"}] GPU {gpu} seed{seed}', flush=True)
-            if result.returncode: failures.append(str(log))
-    with ThreadPoolExecutor(max_workers=len(gpus)) as pool:
-        failures = [f for group in pool.map(worker, gpus) for f in group]
-    if failures:
-        raise RuntimeError('Results were not merged; inspect logs:\n' + '\n'.join(failures))
-    merge_no_temp_results(base)
-
-
 GROUPS = {
     "main": MAIN_KEYS,
     "rate": RATE_JOB_KEYS,
     "snr": SNR_KEYS,
     "ablation": CORE_KEYS,
     "semantic_snr": SEMANTIC_SNR_KEYS,
-    "scnn_refresh": SCNN_REFRESH_KEYS,
-    "slista_refresh": SLISTA_REFRESH_KEYS,
-    "v3_refresh": V3_REFRESH_KEYS,
+    "slista": SLISTA_KEYS,
+    "baselines": BASELINE_KEYS,
 }
 
 def selected_experiments(run):
@@ -1483,6 +1610,9 @@ def worker_command(root, experiment, seed, args):
         command.append("--force-retrain")
     if args.force_retrain_classifier:
         command.append("--force-retrain-classifier")
+    if args.classifier_only:
+        command.append("--classifier-only")
+    command += slista_override_args(args)
     return command
 
 def run_followup(root, gpu, arguments, log_name):
@@ -1581,9 +1711,7 @@ def dispatch_training(args):
         [str(root / "main.py"), "--gpu", "0", "--summarize-only"],
         "summarize.log",
     )
-    if args.run in (
-        "all", "main", "scnn_refresh", "slista_refresh", "v3_refresh"
-    ) and not args.skip_analysis:
+    if args.run in ("all", "main", "slista") and not args.skip_analysis:
         run_followup(
             root,
             first_gpu,
@@ -1602,10 +1730,36 @@ def dispatch_training(args):
         )
     print(f"[Complete] results={Config.RESULTS_DIR}", flush=True)
 
+SLISTA_FLAGS = {
+    "slista-kappa": "SLISTA_KAPPA",
+    "slista-beta": "SLISTA_BETA",
+    "slista-alpha": "SLISTA_ALPHA",
+    "slista-rho": "SLISTA_RHO",
+    "slista-lambda": "SLISTA_LAMBDA_S",
+    "slista-lr-scale": "SLISTA_LR_SCALE",
+    "slista-theta-lr-ratio": "SLISTA_THETA_LR_RATIO",
+    "slista-g-lr-ratio": "SLISTA_G_LR_RATIO",
+    "slista-tx-threshold": "SLISTA_TX_THRESHOLD",
+    "slista-semantic-weight": "SLISTA_SEMANTIC_WEIGHT",
+    "slista-weight-decay-p": "SLISTA_WEIGHT_DECAY_P",
+    "slista-weight-decay-g": "SLISTA_WEIGHT_DECAY_G",
+}
+
+
+def slista_override_args(args):
+    """CLI flags for the S-LISTA overrides given on this command line."""
+    flags = []
+    for flag, name in SLISTA_FLAGS.items():
+        value = getattr(args, name, None)
+        if value is not None:
+            flags += [f"--{flag}", repr(float(value))]
+    return flags
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--gpus", nargs="+", type=int, default=[4, 5])
+    parser.add_argument("--gpus", nargs="+", type=int, default=[0])
     rayleigh = parser.add_mutually_exclusive_group()
     rayleigh.add_argument("--rayleigh-all", action="store_true", help="Frozen scans + AER scatter, one job per GPU, then summarize")
     rayleigh.add_argument("--rayleigh-eval-only", action="store_true")
@@ -1618,6 +1772,8 @@ def parse_args():
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--force-retrain", action="store_true")
     parser.add_argument("--force-retrain-classifier", action="store_true")
+    parser.add_argument("--classifier-only", action="store_true",
+                        help="fail instead of retraining any reconstruction model")
     parser.add_argument("--summarize-only", action="store_true")
     parser.add_argument("--analysis-only", action="store_true")
     parser.add_argument("--max-batches-analysis", type=int, default=0)
@@ -1628,10 +1784,15 @@ def parse_args():
     parser.add_argument('--paper-rayleigh-one', action='store_true')
     parser.add_argument('--paper-source-results', type=Path)
     parser.add_argument('--paper-analysis-seed', type=int, default=42)
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--retrain-without-temperature", action="store_true")
-    mode.add_argument("--without-temperature-one", action="store_true")
-    parser.add_argument("--run", choices=["all", "main", "rate", "snr", "ablation", "semantic_snr", "scnn_refresh", "slista_refresh", "v3_refresh"])
+    parser.add_argument("--downstream", action="store_true",
+                        help="with --recon-only: also train/evaluate the downstream classifier")
+    parser.add_argument("--recon-only", action="store_true",
+                        help="Train/evaluate the reconstruction model only")
+    # S-LISTA hyperparameter overrides (otherwise config.py and
+    # configs/slista.json are used).
+    for flag, name in SLISTA_FLAGS.items():
+        parser.add_argument(f"--{flag}", type=float, default=None, dest=name)
+    parser.add_argument("--run", choices=["all"] + list(GROUPS))
     parser.add_argument("--processes-per-gpu", type=int, default=2)
     parser.add_argument("--seeds", nargs="+", type=int, default=Config.DEFAULT_SEEDS)
     parser.add_argument("--skip-analysis", action="store_true")
@@ -1650,6 +1811,10 @@ def main():
     Config.RESULTS_DIR = str(Path(args.results_dir).resolve())
     Config.PROCESSED_DIR = str(Path(args.data_dir).resolve())
     Config.NUM_WORKERS = args.num_workers
+    for name in SLISTA_FLAGS.values():
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(Config, name, float(value))
     os.environ["SHD_OUTPUT_DIR"] = Config.RESULTS_DIR
     os.environ["SHD_DATA_DIR"] = Config.PROCESSED_DIR
     os.environ["SHD_NUM_WORKERS"] = str(args.num_workers)
@@ -1666,12 +1831,6 @@ def main():
     Config._CLI_RECON_LR = args.recon_lr
     Config._CLI_CLASSIFIER_LR = args.classifier_lr or 1e-3
     Config._CLI_EVAL_10_ONLY = args.eval_10db_only
-    if args.retrain_without_temperature or args.without_temperature_one:
-        if args.retrain_without_temperature:
-            dispatch_no_temp(args)
-        else:
-            no_temp_worker(args)
-        return
     if args.paper_rayleigh_all or args.paper_rayleigh_one:
         if args.paper_source_results:
             Config.RESULTS_DIR = str(args.paper_source_results.resolve())
@@ -1690,6 +1849,8 @@ def main():
         summarize()
     elif args.analysis_only:
         collect_analysis(args.seed, args.max_batches_analysis)
+    elif args.experiment and args.recon_only:
+        run_recon_only(args)
     elif args.experiment:
         run_one(args)
     else:

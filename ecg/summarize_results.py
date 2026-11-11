@@ -18,12 +18,18 @@ def grouped(frames, keys, value):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,default=Path('outputs'));a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,default=Path('outputs'))
+    # Optional: energy from energy_ecg.py (records.json: compute + weight reads
+    # + state reads/writes) instead of the
+    # 4.6 / 0.9 pJ operation-only estimate stored with each seed.
+    p.add_argument('--energy',type=Path,default=None,help='records.json written by energy_ecg.py')
+    a=p.parse_args()
     runs=[]
     for seed in range(42,47):
         root=a.output/f'seed{seed}'
-        for phase in ('fixed','learned','quantization','final_slista'):
-            expected=16 if phase=='quantization' else (1 if phase=='final_slista' else 4)
+        for phase in ('fixed','learned','quantization'):
+            # quantization: 4 models x {2,4,6} bit; 8 bit is the learned phase
+            expected=12 if phase=='quantization' else 4
             completed=list((root/phase).rglob('job.json'))
             if len(completed)!=expected: raise ValueError(f'{root/phase}: expected {expected} jobs')
             for job in completed:
@@ -42,6 +48,18 @@ def main():
         else:
             cache[key]={t:float(np.mean([d['cache'][key][t] for d in runs])) for t in TARGETS}
             cache[key+'_std']={t:float(np.std([d['cache'][key][t] for d in runs],ddof=1)) for t in TARGETS}
+    energy_accounting='operation count: 4.6 pJ per MAC, 0.9 pJ per AC, no memory access'
+    if a.energy is not None:
+        records=json.loads(a.energy.read_text())
+        new_energy={};new_std={}
+        for t in TARGETS:
+            by_seed={int(r['seed']):r['energy_pj']['total']*1e-6 for r in records[t]}
+            if sorted(by_seed)!=list(range(42,47)): raise ValueError(f'{a.energy}: {t} needs seeds 42-46, has {sorted(by_seed)}')
+            values=[by_seed[s] for s in range(42,47)]
+            new_energy[t]=float(np.mean(values));new_std[t]=float(np.std(values,ddof=1))
+        cache['energy']=new_energy;cache['energy_std']=new_std
+        energy_accounting=f'compute + weight and state memory access, from {a.energy}'
+        print('Energy (uJ/sample, with memory access): '+', '.join(f'{t} {new_energy[t]:.4f} +- {new_std[t]:.4f}' for t in TARGETS))
     for key in ('layer_positive','layer_negative','layer_drive_ratio'):
         values=np.asarray([d['cache'][key] for d in runs]);cache[key]=values.mean(axis=0);cache[key+'_std']=values.std(axis=0,ddof=1)
     totals=np.asarray([np.asarray(d['cache']['layer_positive'])+np.asarray(d['cache']['layer_negative']) for d in runs])
@@ -52,7 +70,7 @@ def main():
     out=a.output/'figures';out.mkdir(parents=True,exist_ok=True)
     metrics=a.output/'metrics';metrics.mkdir(exist_ok=True)
     for name,df in [('awgn',robust),('rayleigh',ray),('quantization',quant)]: df.to_csv(metrics/f'{name}.csv',index=False)
-    summary=dict(stats,energy=cache['energy'],energy_std=cache['energy_std'],fixed_std=cache['fixed_std'],learned_std=cache['learned_std'],seeds=list(range(42,47)),example_seed=42,uncertainty='sample standard deviation across five training seeds; firing stacked upper error = SD of total')
+    summary=dict(stats,energy=cache['energy'],energy_std=cache['energy_std'],fixed_std=cache['fixed_std'],learned_std=cache['learned_std'],energy_accounting=energy_accounting,seeds=list(range(42,47)),example_seed=42,uncertainty='sample standard deviation across five training seeds; firing stacked upper error = SD of total')
     (metrics/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     args=SimpleNamespace(output_dir=out)
     plot_composite(cache,robust,stats['fixed_nmse'],stats['learned_nmse'],quant,args,ray)

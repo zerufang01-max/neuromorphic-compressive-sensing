@@ -1,0 +1,14 @@
+{
+  "kappa": 1.5,
+  "beta": 1.0,
+  "alpha": 0.3,
+  "rho": 0.3,
+  "lambda_s": 0.01,
+  "tx_threshold": 0.25,
+  "p_weight_decay": 0.0,
+  "lr_scale": 2.0,
+  "theta_lr_ratio": 0.3,
+  "g_lr_ratio": 0.5,
+  "threshold_floor": 0.01,
+  "semantic_shift": 0.0
+}

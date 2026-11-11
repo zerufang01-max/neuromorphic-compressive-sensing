@@ -1,3 +1,6 @@
+"""Convert the SHD HDF5 files into tensors of spike counts
+(T time bins x 700 channels per sample), saved as .pt files for utils.SHDDataset.
+"""
 import os
 import h5py
 import numpy as np

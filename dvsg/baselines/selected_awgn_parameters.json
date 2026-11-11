@@ -1,0 +1,23 @@
+{
+  "selection_metric": "reconstructed-x Accuracy (%) at 10 dB",
+  "seed": 42,
+  "scan_epochs": 50,
+  "ann": {
+    "ann_lista_lr": 0.0005,
+    "ann_lstm_lr": 0.0002
+  },
+  "snn": {
+    "scnn": {
+      "lr": 0.0004,
+      "tx_threshold": 0.2,
+      "neuron_threshold": 0.2,
+      "leak": 0.5,
+      "surrogate_tau": 0.3
+    }
+  },
+  "classifier": {
+    "ann_lista_q8": 0.0008,
+    "ann_lstm_q8": 0.0005,
+    "scnn_dense": 0.0008
+  }
+}

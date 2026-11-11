@@ -9,7 +9,7 @@ import torch
 class Config:
     # Bump this tag whenever an algorithm definition changes so that stale
     # checkpoints cannot be loaded silently.
-    CODE_VERSION = "ecg-separated-validation"
+    CODE_VERSION = "ecg-slista"
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -20,16 +20,38 @@ class Config:
 
     N = 256
     TOTAL_SIGNAL_LEN = N
-    TIME_STEPS = 1
-    DECODER_TAU = 0.3
+    # Single-frame ECG beats: one time step, so the membrane leak rho of the
+    # paper's Eq. (6) never acts and is not a parameter of this code.
 
     TOTAL_MEAS_TARGET = 78
     M = max(1, round(TOTAL_MEAS_TARGET * N / 256))
     EFFECTIVE_TOTAL_MEAS = M
 
     DICT_SIZE = N
+    # Unfolded depth L.  S-LISTA: L-1 = 7 spiking layers + 1 non-spiking
+    # readout layer, i.e. one m x n and L-1 n x n matrices, the same matrix
+    # count as ANN LISTA with K = L layers.
     NUM_LAYERS = 8
-    SURROGATE_WIDTH = 0.5
+
+    # S-LISTA threshold initialisation (dimensionless, see SpikingLISTA):
+    # theta_1 = kappa * sigma, theta_{L-1} = beta * sigma, geometric in
+    # between; eta = 1 / theta_{L-1}.  sigma = standard deviation of the
+    # initial current P y over all coordinates of one training batch.
+    SLISTA_KAPPA = "universal"          # sqrt(2 ln n)
+    SLISTA_BETA = 2.0
+    SLISTA_ALPHA = 0.4                  # surrogate half-width / theta_l
+    SLISTA_THRESHOLD_FLOOR = 1e-2       # theta = floor + softplus(r)
+    SLISTA_CALIBRATION_SEED = 2027      # offset added to SEED: calibration batch and channel draw
+    # S-LISTA learning rates of the sensing matrix and the dictionary relative
+    # to lr_model (P, G, thresholds, eta).  configs/paper.json may override.
+    SLISTA_PHI_LR_RATIO = 0.5
+    SLISTA_DICTIONARY_LR_RATIO = 1.0
+    # Learning rate of the firing thresholds relative to lr_model: controls how
+    # fast the thresholds move (decrease) during training.
+    SLISTA_THETA_LR_RATIO = 1.0
+    # Learning rate of the residual operators G relative to lr_model (P, eta).
+    SLISTA_G_LR_RATIO = 1.0
+    VAL_EVERY = 10                      # validation / checkpoint selection interval (epochs)
 
     USE_WIRELESS = True
     TRAIN_SNR_DB = 5.0
@@ -61,11 +83,9 @@ class Config:
 
     THETA_LAMP = 0.20
     THETA_LISTA_ANN = 0.20
-    THETA_LISTA_SNN = 1.0
-    # Standard fan-in Kaiming-uniform initialization.
+    # Standard fan-in Kaiming-uniform initialization of P and G.
     SLISTA_INIT = "random"
 
-    FINAL_THETA_SNN = 0.20
     THETA_FISTA = 0.20
     THETA_ALISTA = 0.20
     FISTA_ITERATIONS = NUM_LAYERS
@@ -89,10 +109,15 @@ class Config:
         "lr_dictionary": 1e-3,
         "weight_decay": 0.0,
     }
+    # Base learning rates of every method.  Each job multiplies all rates of
+    # its method by one scale s (configs/paper.json "lr_scale", selected by
+    # lr_search.py on the validation split), so only the ratios between the
+    # parameter groups below are fixed.  S-LISTA: P, G, thresholds and eta use
+    # lr_model; the sensing matrix 0.5 lr_model; the dictionary 1.0 lr_model.
     LISTA_SNN_CONFIG = {
-        "epochs": FORMAL_TRAIN_EPOCHS, "lr_model": 3e-3,
-        "lr_phi": 1.5e-3,
-        "lr_dictionary": 3e-3,
+        "epochs": FORMAL_TRAIN_EPOCHS, "lr_model": 1e-3,
+        "lr_phi": 5e-4,
+        "lr_dictionary": 1e-3,
         "p_weight_decay": 0.0,
         "weight_decay": 0.0,
     }
@@ -154,6 +179,5 @@ class Config:
         print(f"Train channel mode: {Config.TRAIN_CHANNEL_MODE}")
         print(f"Eval channel mode: {Config.EVAL_CHANNEL_MODE}")
         print(f"Compression M/N: {Config.M}/{Config.N}")
-        print(f"TIME_STEPS (SNN): {Config.TIME_STEPS}")
         print(f"Results dir: {Config.RESULTS_DIR}")
 

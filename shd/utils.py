@@ -1,3 +1,4 @@
+"""Dataset, data loaders, random-number helpers, metrics and plotting helpers of the SHD experiments."""
 import torch
 import numpy as np
 import os
@@ -64,6 +65,7 @@ def count_reconstruction_parameters(model, sensor, mode=None):
     }
 
 class SHDDataset(data.Dataset):
+    """Preprocessed SHD spike counts (T x 700 per sample), kept on the training device."""
     def __init__(self, split='train'):
         self.split = split
         

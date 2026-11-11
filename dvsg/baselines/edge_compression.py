@@ -1,9 +1,17 @@
+"""Transmitter of the DVS-Gesture baselines.
+
+EdgeSensor maps a 2 x 128 x 128 event frame to a C x 32 x 32 measurement map
+with three convolutions (16, 32 and C channels; strides 2, 1, 2).  In spiking
+mode the convolutions are followed by LIF neurons and the output is a binary
+spike map; in ANN mode they use ReLU and the output is quantized to 8 bits.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from config import Config
 
 class SurrogateSpike(torch.autograd.Function):
+    """Heaviside step with a rectangular surrogate gradient."""
     @staticmethod
     def forward(ctx, input):
         ctx.save_for_backward(input)
@@ -16,17 +24,24 @@ class SurrogateSpike(torch.autograd.Function):
         mask = (input.abs() < 0.5).float()
         return grad_input * mask
 
-class BinarizeSTE(torch.autograd.Function):
+class ProbabilityUniformQuantizeSTE(torch.autograd.Function):
+    """Uniform quantization of values in [0, 1] with a straight-through gradient."""
     @staticmethod
-    def forward(ctx, inputs):
-        ctx.save_for_backward(inputs)
-        return torch.round(inputs)
+    def forward(ctx, inputs, bits):
+        bits = int(bits)
+        if bits not in (1, 2, 4, 8):
+            raise ValueError(
+                f"ANN quantization bits must be 1, 2, 4, or 8; got {bits}."
+            )
+        levels = (1 << bits) - 1
+        return torch.round(torch.clamp(inputs, 0.0, 1.0) * levels) / levels
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output
+        return grad_output, None
 
 class LIFEncoder(nn.Module):
+    """Memoryless integrate-and-fire layer with soft reset (internal layers of the sensor)."""
     def __init__(self):
         super().__init__()
         self.register_buffer('thresh', torch.tensor(Config.ENCODER_THRESHOLD))
@@ -46,6 +61,7 @@ class LIFEncoder(nn.Module):
         return spike, v
 
 class EdgeSensor(nn.Module):
+    """Convolutional sensing network with a binary spike output (spiking) or an 8-bit output (ANN)."""
     def __init__(self):
         super().__init__()
         self.mode = 'ann'
@@ -106,13 +122,16 @@ class EdgeSensor(nn.Module):
         feat_sig = torch.sigmoid(feat)
         
         if mode == 'ann':
+            bits = int(Config.ANN_QUANT_BITS)
             y_flat = feat_sig.view(feat_sig.size(0), -1)
-            y_out = BinarizeSTE.apply(y_flat)
+            y_out = ProbabilityUniformQuantizeSTE.apply(y_flat, bits)
             new_state = (None, None, None)
             aux_dict = {
                 'tx_prob': None,
                 'tx_hard': y_out,
-                'tau': None
+                'tau': None,
+                'quant_bits': bits,
+                'transport': 'dense_quantized_bit_awgn',
             }
         else:
             if s_final is None:
@@ -142,12 +161,26 @@ class EdgeSensor(nn.Module):
                 v_next = v - s_hard * theta
                 
             with torch.no_grad():
-                tx_total_spikes = s_hard.sum().item()
-                tx_assisted_spikes = ((feat_sig < theta) & (m >= theta)).sum().item()
-                tx_counterfactual_reset_spikes = (feat_sig >= theta).sum().item()
+                tx_total_spikes = s_hard.sum()
+                tx_assisted_spikes = (
+                    (feat_sig < theta) & (m >= theta)
+                ).sum()
+                tx_counterfactual_reset_spikes = (
+                    feat_sig >= theta
+                ).sum()
                 active_mask = (s_hard > 0).float()
                 state_term = torch.clamp(rho * prev_v, min=0.0)
-                tx_state_contribution_sum = (state_term * active_mask).sum().item()
+                tx_state_contribution_sum = (
+                    state_term * active_mask
+                ).sum()
+                if p is not None:
+                    tx_soft_sum = p.sum()
+                    tx_abs_soft_hard_sum = torch.abs(
+                        p - s_hard
+                    ).sum()
+                else:
+                    tx_soft_sum = tx_total_spikes
+                    tx_abs_soft_hard_sum = tx_total_spikes.new_zeros(())
             
             y_out = s_st.view(s_st.size(0), -1)
             new_state = (next_s_lif1, next_s_lif2, v_next)
@@ -160,9 +193,15 @@ class EdgeSensor(nn.Module):
                 'tx_assisted_spikes': tx_assisted_spikes,
                 'tx_counterfactual_reset_spikes': tx_counterfactual_reset_spikes,
                 'tx_state_contribution_sum': tx_state_contribution_sum,
-                'tx_threshold': theta.item(),
+                'tx_threshold': theta.detach(),
                 'tx_rho': rho,
-                'tx_elements': s_hard.numel()
+                'tx_elements': s_hard.numel(),
+                'tx_soft_sum': tx_soft_sum,
+                'tx_abs_soft_hard_sum': tx_abs_soft_hard_sum,
+                # Detached threshold differences are sampled by Trainer only
+                # for the empirical density diagnostic of the annealing.
+                'tx_threshold_margin': (m - theta).detach(),
+                'transport': Config.SNN_TRANSPORT,
             }
             
         return y_out, new_state, aux_dict

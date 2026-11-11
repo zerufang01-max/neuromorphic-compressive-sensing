@@ -1,3 +1,13 @@
+"""Baseline models.
+
+- ConvolutionalLISTA: ANN LISTA.  The module also constructs P_snn, PD_snn and
+  fixed_theta_snn, which the ANN forward does not use; they are kept because
+  they are part of the stored checkpoints and of the initialisation order.
+- ConvLSTMRecon: ANN ConvLSTM.  SpikingCNNRecon: Vanilla SNN.
+- LatentVideoClassifier: auxiliary task head on the code; VideoClassifier:
+  downstream classifier on reconstructed video.
+Settings are read from config.Config at construction.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,18 +16,22 @@ import math
 
 class SurrogateSpike(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, threshold):
+    def forward(ctx, input, threshold, tau):
         if not isinstance(threshold, torch.Tensor):
             threshold = torch.tensor(threshold, device=input.device, dtype=input.dtype)
-        ctx.save_for_backward(input, threshold)
+        ctx.save_for_backward(input, threshold, input.new_tensor(float(tau)))
         return (input >= threshold).float()
     
     @staticmethod
     def backward(ctx, grad_output):
-        input, threshold = ctx.saved_tensors
-        grad_input = grad_output.clone()
-        mask = ((input - threshold).abs() < Config.SURROGATE_WIDTH).float()
-        return grad_input * mask, None
+        input, threshold, tau = ctx.saved_tensors
+        delta = input - threshold
+        if Config.DECODER_SURROGATE_MODE == 'hard':
+            derivative = (delta.abs() < Config.SURROGATE_WIDTH).float()
+        else:
+            probability = torch.sigmoid(delta / tau.clamp_min(1e-4))
+            derivative = probability * (1.0 - probability) / tau.clamp_min(1e-4)
+        return grad_output * derivative, None, None
 
 class RegressionGLIF(nn.Module):
     def __init__(self, channels):
@@ -36,7 +50,9 @@ class RegressionGLIF(nn.Module):
             if not isinstance(threshold, torch.Tensor):
                 threshold = torch.tensor(threshold, device=x_in.device, dtype=x_in.dtype)
                 
-            spikes = SurrogateSpike.apply(V, threshold)
+            spikes = SurrogateSpike.apply(
+                V, threshold, Config.DECODER_SURROGATE_TAU
+            )
             V = V - spikes * threshold
             return spikes, V
 
@@ -48,6 +64,7 @@ class BiasFreeBatchNorm(nn.BatchNorm2d):
         return super().forward(input)
 
 class VideoClassifier(nn.Module):
+    """Reconstructed-video head isomorphic to the latent z classifier."""
     def __init__(self, num_classes, time_steps=16):
         super().__init__()
         self.features = nn.Sequential(
@@ -62,7 +79,9 @@ class VideoClassifier(nn.Module):
             nn.AdaptiveAvgPool3d(1)
         )
         self.head = nn.Sequential(
-            nn.Flatten(), nn.Dropout(0.50), nn.Linear(256, num_classes)
+            nn.Flatten(),
+            nn.Dropout(float(Config.SEMANTIC_DROPOUT)),
+            nn.Linear(256, num_classes),
         )
 
     def forward(self, x_video):
@@ -73,6 +92,7 @@ class VideoClassifier(nn.Module):
         return self.head(x)
 
 class LatentVideoClassifier(nn.Module):
+    """Existing latent 3D-CNN architecture used as the joint z head."""
     def __init__(self, in_channels, num_classes, time_steps=16):
         super().__init__()
         self.features = nn.Sequential(
@@ -87,7 +107,9 @@ class LatentVideoClassifier(nn.Module):
             nn.AdaptiveAvgPool3d(1)
         )
         self.head = nn.Sequential(
-            nn.Flatten(), nn.Dropout(0.50), nn.Linear(256, num_classes)
+            nn.Flatten(),
+            nn.Dropout(float(Config.SEMANTIC_DROPOUT)),
+            nn.Linear(256, num_classes),
         )
 
     def forward(self, x_video):
@@ -140,12 +162,21 @@ class ConvLSTMRecon(nn.Module):
         self._init_weights()
         
   
-        self.classifier_image = VideoClassifier(Config.NUM_CLASSES, Config.TIME_STEPS)
-        self.classifier_latent = LatentVideoClassifier(self.hidden_dim, Config.NUM_CLASSES, Config.TIME_STEPS)
+        self.semantic_head = LatentVideoClassifier(
+            self.hidden_dim, Config.NUM_CLASSES, Config.TIME_STEPS
+        )
         
     def _init_weights(self):
+        # The final reconstruction layer is followed by Sigmoid.  Initializing
+        # this 64 -> INPUT_CHANNELS convolution with ReLU Kaiming/fan_out gives
+        # it an excessively large scale and can saturate the output for some
+        # seeds.  Keep every other original initializer unchanged.
+        output_conv = self.tail[-2]
         for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+            if m is output_conv:
+                nn.init.xavier_uniform_(m.weight, gain=1.0)
+                if m.bias is not None: nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None: nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Conv3d):
@@ -157,19 +188,26 @@ class ConvLSTMRecon(nn.Module):
         
         algo_params = []
         dict_params = []
+        semantic_params = []
         
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            # 'tail' decodes the hidden state back to image space
-            if 'tail' in name:
+            if name.startswith('semantic_head.'):
+                semantic_params.append(param)
+            elif 'tail' in name:
                 dict_params.append(param)
             else:
                 algo_params.append(param)
 
         return [
             {'params': algo_params, 'lr': lr_algo},
-            {'params': dict_params, 'lr': lr_dict}
+            {'params': dict_params, 'lr': lr_dict},
+            {
+                'params': semantic_params,
+                'lr': hp.get('lr_semantic', 3e-4),
+                'weight_decay': Config.SEMANTIC_WEIGHT_DECAY,
+            },
         ]
 
     def forward(self, y_flat, states=None):
@@ -210,8 +248,9 @@ class ConvolutionalLISTA(nn.Module):
         self._init_weights()
         
      
-        self.classifier_image = VideoClassifier(Config.NUM_CLASSES, Config.TIME_STEPS)
-        self.classifier_latent = LatentVideoClassifier(self.sparse_dim, Config.NUM_CLASSES, Config.TIME_STEPS)
+        self.semantic_head = LatentVideoClassifier(
+            self.sparse_dim, Config.NUM_CLASSES, Config.TIME_STEPS
+        )
 
     def _init_weights(self):
         for m in self.modules():
@@ -228,23 +267,52 @@ class ConvolutionalLISTA(nn.Module):
 
         algo_params = []
         dict_params = []
+        threshold_params = []
+        semantic_params = []
         
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            # 'tail' acts as the synthesis dictionary D in x = Dz
-            if 'tail' in name:
+            if name.startswith('semantic_head.'):
+                semantic_params.append(param)
+            elif name.startswith('theta_ann.'):
+                threshold_params.append(param)
+            elif 'tail' in name:
                 dict_params.append(param)
             else:
                 algo_params.append(param)
 
         return [
             {'params': algo_params, 'lr': lr_algo},
-            {'params': dict_params, 'lr': lr_dict}
+            {'params': dict_params, 'lr': lr_dict},
+            {
+                'params': threshold_params,
+                'lr': hp.get('lr_theta_ann', 5e-4),
+            },
+            {
+                'params': semantic_params,
+                'lr': hp.get('lr_semantic', 3e-4),
+                'weight_decay': Config.SEMANTIC_WEIGHT_DECAY,
+            },
         ]
 
     def get_threshold_value(self):
+        if getattr(self, 'mode', 'spiking') in ('ann', 'rate'):
+            return float(
+                self.theta_ann[0].detach().clamp_min(1e-4).item()
+            )
         return float(self.fixed_theta_snn.reshape(-1)[0].item())
+
+    def get_ann_threshold_values(self):
+        return [
+            float(theta.detach().clamp_min(1e-4).item())
+            for theta in self.theta_ann
+        ]
+
+    def project_ann_thresholds(self):
+        with torch.no_grad():
+            for theta in self.theta_ann:
+                theta.clamp_(min=1e-4)
 
     def forward(self, y_flat, states=None):
         B = y_flat.shape[0]
@@ -256,81 +324,14 @@ class ConvolutionalLISTA(nn.Module):
             layers_out = []
             for k in range(self.K):
                 z_in = We_y + self.S_k[k](z)
-                z = F.softshrink(z_in, self.theta_ann[k].item())
+                theta_k = self.theta_ann[k].clamp_min(1e-4)
+                z = torch.sign(z_in) * F.relu(
+                    torch.abs(z_in) - theta_k
+                )
                 layers_out.append(z)
             return self.tail(z), layers_out, None, {}
 
-        theta = self.fixed_theta_snn
-        I_0 = self.P_snn(y_meas)
-        
-        if states is None:
-            states = torch.zeros(
-                self.K,
-                B,
-                self.sparse_dim,
-                self.h_dim,
-                self.h_dim,
-                device=y_flat.device,
-            )
-        
-        frame_decay = y_meas.new_tensor(Config.DECODER_TAU)
-        
-        # z_k is maintained directly in coefficient-amplitude units.
-        # Each signed spike contributes +/- theta to the sparse coefficient.
-        z_k = torch.zeros_like(I_0)
-        next_states = torch.zeros_like(states)
-        layers_out = []
-        total_spikes = 0.0
-        
-        for k in range(self.K):
-            # The feedback convolution now receives coefficients in the same
-            # amplitude units used by the membrane potential and final output.
-            I_k = I_0 if k == 0 else I_0 - self.PD_snn[k](z_k)
-        
-            u_k = frame_decay * states[k] + I_k
-        
-            spk_pos = SurrogateSpike.apply(u_k, theta)
-            spk_neg = SurrogateSpike.apply(-u_k, theta)
-            s_k = spk_pos - spk_neg
-        
-            z_inc = theta * s_k
-            z_k = z_k + z_inc
-        
-            # Soft reset uses exactly the same coefficient increment.
-            u_k = u_k - z_inc
-        
-            next_states[k] = u_k
-            layers_out.append(z_k)
-        
-            total_spikes += (
-                spk_pos.sum().item()
-                + spk_neg.sum().item()
-            )
-        
-        # Add the final sub-threshold residual potential to the accumulated
-        # spike-domain coefficient estimate.
-        z_final_raw = z_k + next_states[-1]
-        
-        # Keep the existing shared threshold. Setting INIT_THRESHOLD=0.1 in
-        # config.py also sets THETA_LISTA_ANN and THETA_LISTA_SNN to 0.1.
-        z_final = F.softshrink(
-            z_final_raw,
-            Config.THETA_LISTA_ANN,
-        )
-        
-        if self.K > 0:
-            layers_out[-1] = z_final
-
-        internal_stats = {
-            'fired_rate': total_spikes / max(1, 2 * B * self.sparse_dim * self.h_dim * self.h_dim * max(self.K, 1)),
-            'theta': float(theta.mean().item()),
-            'frame_decay': float(frame_decay.item()),
-        }
-        return self.tail(z_final), layers_out, next_states, internal_stats
-
-class ConvolutionalLISTA_ImageSpace(ConvolutionalLISTA):
-    def __init__(self):
-        super().__init__()
+        raise RuntimeError("ConvolutionalLISTA implements ANN LISTA only (mode 'rate')")
 
 class SpikingResBlock(nn.Module):
     def __init__(self, channels):
@@ -412,13 +413,13 @@ class SpikingCNNRecon(nn.Module):
         )
 
         self._init_weights()
-        self.thresh = nn.Parameter(torch.tensor(Config.DECODER_THRESHOLD))
-
-        self.classifier_image = VideoClassifier(
-            Config.NUM_CLASSES,
-            Config.TIME_STEPS,
+        self.register_buffer(
+            'thresh',
+            torch.tensor(Config.DECODER_THRESHOLD),
+            persistent=False,
         )
-        self.classifier_latent = LatentVideoClassifier(
+
+        self.semantic_head = LatentVideoClassifier(
             self.sparse_dim,
             Config.NUM_CLASSES,
             Config.TIME_STEPS,
@@ -445,19 +446,26 @@ class SpikingCNNRecon(nn.Module):
         
         algo_params = []
         dict_params = []
+        semantic_params = []
         
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            # All upsampling layers and the final tail act as the dictionary
-            if 'conv_up' in name or 'bn_up' in name or 'tail' in name:
+            if name.startswith('semantic_head.'):
+                semantic_params.append(param)
+            elif 'conv_up' in name or 'bn_up' in name or 'tail' in name:
                 dict_params.append(param)
             else:
                 algo_params.append(param)
 
         return [
             {'params': algo_params, 'lr': lr_algo},
-            {'params': dict_params, 'lr': lr_dict}
+            {'params': dict_params, 'lr': lr_dict},
+            {
+                'params': semantic_params,
+                'lr': hp.get('lr_semantic', 3e-4),
+                'weight_decay': Config.SEMANTIC_WEIGHT_DECAY,
+            },
         ]
 
     def forward(self, y_flat, states=None):
@@ -493,4 +501,3 @@ class SpikingCNNRecon(nn.Module):
         x_recon = self.tail(x)
 
         return x_recon, [latent_code], next_states, {}
-

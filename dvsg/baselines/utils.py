@@ -1,3 +1,4 @@
+"""Dataset, data loaders, parameter counting and plotting helpers of the DVS-Gesture baselines."""
 import torch
 import torch.utils.data as data
 import torch.nn as nn
@@ -15,6 +16,84 @@ import random
 from PIL import Image
 import io
 import math
+
+
+def seed_worker(worker_id):
+    """Make DataLoader workers reproducible for the active experiment seed."""
+    worker_seed = (int(Config.SEED) + int(worker_id)) % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def deterministic_eval(seed=None):
+    if seed is None:
+        seed = Config.EVAL_CHANNEL_SEED
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def count_reconstruction_parameters(model, sensor, mode=None):
+    """
+    Count the scope reported in the paper: measurement network plus
+    reconstruction network/dictionary, excluding both downstream classifiers.
+    """
+    semantic_prefix = "semantic_head."
+
+    # ConvolutionalLISTA stores ANN and spiking solvers in one checkpoint.
+    # Count only the branch exercised by the reported method.  Layer 0 of the
+    # recurrent operator is also inactive: its input code is identically zero
+    # (ANN), or the code-feedback operator is bypassed explicitly (S-LISTA).
+    model_class = model.__class__.__name__
+    inactive_prefixes = ()
+    active_mode = mode or getattr(model, 'mode', 'spiking')
+    if (
+        model_class == 'ConvolutionalLISTA_ImageSpace'
+        or (
+            model_class == 'ConvolutionalLISTA'
+            and active_mode == 'spiking'
+        )
+    ):
+        inactive_prefixes = ('W_e.', 'S_k.', 'theta_ann.', 'PD_snn.0.')
+    elif model_class == 'ConvolutionalLISTA':
+        inactive_prefixes = ('P_snn.', 'PD_snn.', 'S_k.0.')
+
+    measurement_params = sum(p.numel() for p in sensor.parameters())
+    reconstruction_params = 0
+    semantic_head_params = 0
+    inactive_params = 0
+    for name, param in model.named_parameters():
+        if name.startswith(semantic_prefix):
+            semantic_head_params += param.numel()
+        elif name.startswith(inactive_prefixes):
+            inactive_params += param.numel()
+        else:
+            reconstruction_params += param.numel()
+
+    full_model_params = sum(p.numel() for p in model.parameters())
+
+    if (
+        reconstruction_params + inactive_params + semantic_head_params
+        != full_model_params
+    ):
+        raise RuntimeError("Parameter audit failed: model partitions do not sum to the full model.")
+
+    return {
+        'Measurement Params': int(measurement_params),
+        'Reconstruction Params': int(reconstruction_params),
+        'Reported Total Params': int(measurement_params + reconstruction_params),
+        'Semantic Head Params': int(semantic_head_params),
+        'Task System Params': int(
+            measurement_params + reconstruction_params
+            + semantic_head_params
+        ),
+        'Excluded Classifier Params': 0,
+        'Inactive Branch Params': int(inactive_params),
+        'Full Model Params': int(full_model_params),
+    }
 
 def calculate_accuracy(output, target):
     with torch.no_grad():
@@ -243,6 +322,7 @@ def save_snn_visualization_gif(model, sensor, channel, loader, filename):
         gif_images[0].save(save_path, save_all=True, append_images=gif_images[1:], optimize=False, duration=150, loop=0)
 
 class VideoRandomAffine:
+    """Random translation with one shift shared by all frames of a sample."""
     def __init__(self, degrees=0, translate=None, scale=None):
         self.translate = translate
 
@@ -270,10 +350,11 @@ class VideoRandomAffine:
         return torch.stack(transformed_frames, dim=0)
 
 class DVSGestureDataset(data.Dataset):
+    """16-frame DVS-Gesture samples (2 x 128 x 128 per frame)."""
     def __init__(self, split='train', transform=None):
         self.H, self.W = Config.IMG_H, Config.IMG_W
         self.transform = transform 
-        root_dir = "/workspace0/zf925/spiking_lista_dvsg/data/DVSGesture/frames_number_16_split_by_number"
+        root_dir = Config.DATA_DIR
         target_dir = os.path.join(root_dir, split)
         self.file_list = []
         self.labels = []
@@ -344,10 +425,15 @@ def get_dataloaders(batch_size):
     train_set = DVSGestureDataset(split='train', transform=train_transform)
     val_set = DVSGestureDataset(split='test', transform=None) 
     
-    train_loader = data.DataLoader(train_set, batch_size=batch_size, shuffle=True, 
-                                   num_workers=Config.NUM_WORKERS, pin_memory=True)
+    generator = torch.Generator()
+    generator.manual_seed(int(Config.SEED))
+
+    train_loader = data.DataLoader(train_set, batch_size=batch_size, shuffle=True,
+                                   num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                   worker_init_fn=seed_worker, generator=generator)
     val_loader = data.DataLoader(val_set, batch_size=batch_size, shuffle=False, 
-                                 num_workers=Config.NUM_WORKERS, pin_memory=True)
+                                 num_workers=Config.NUM_WORKERS, pin_memory=True,
+                                 worker_init_fn=seed_worker)
                                  
     return train_loader, val_loader
     

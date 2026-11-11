@@ -1,3 +1,10 @@
+"""Channels of the SHD experiments.
+
+BPSK over AWGN with hard decisions for 8-bit quantized ANN measurements
+(DenseQuantizedAWGNChannel), full binary spike maps (DenseSpikeAWGNChannel)
+and block-based AER addresses (BlockAERAWGNChannel); FrozenRayleighChannel is
+the quasi-static Rayleigh fading channel used for evaluation only.
+"""
 import math
 
 import torch
@@ -79,6 +86,7 @@ class DenseQuantizedAWGNSTE(torch.autograd.Function):
 
 
 class DenseQuantizedAWGNChannel(nn.Module):
+    """BPSK-AWGN channel for the 8-bit quantized measurements of the ANN baselines."""
     def __init__(self, snr_db=None, receiver=None):
         super().__init__()
         self.snr_db = float(

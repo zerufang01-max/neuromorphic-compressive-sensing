@@ -2,122 +2,138 @@
   "seed": 42,
   "train_snr_db": 5.0,
   "l1": 0.0001,
-  "fixed": {
+  "overrides": {
     "lamp": {
-      "epochs": 100,
-      "lr_scale": 1.0
-    },
-    "alista": {
-      "epochs": 100,
-      "lr_scale": 1.0
-    },
-    "lista_ann": {
-      "epochs": 100,
-      "lr_scale": 1.0
+      "THETA_LAMP": 2.0
     },
     "lista_snn_1": {
-      "epochs": 100,
-      "lr_scale": 0.3
+      "SLISTA_BETA": 1.5,
+      "SLISTA_ALPHA": 0.5,
+      "SLISTA_THETA_LR_RATIO": 0.3,
+      "SLISTA_PHI_LR_RATIO": 1.5,
+      "SLISTA_DICTIONARY_LR_RATIO": 1.0,
+      "l1": 0.0001,
+      "SLISTA_G_LR_RATIO": 1.0,
+      "SLISTA_KAPPA": 2.0
+    }
+  },
+  "fixed": {
+    "alista": {
+      "epochs": 100
+    },
+    "lamp": {
+      "epochs": 100
+    },
+    "lista_ann": {
+      "epochs": 100
+    },
+    "lista_snn_1": {
+      "epochs": 100
     }
   },
   "learned": {
     "alista": {
-      "epochs": 100,
-      "lr_scale": 0.2
+      "epochs": 100
     },
     "lamp": {
-      "epochs": 100,
-      "lr_scale": 0.5
+      "epochs": 100
     },
     "lista_ann": {
-      "epochs": 100,
-      "lr_scale": 0.5
+      "epochs": 100
     },
     "lista_snn_1": {
-      "epochs": 100,
-      "lr_scale": 0.2
+      "epochs": 100
     }
   },
   "quantization": {
     "alista": {
       "2": {
-        "epochs": 100,
-        "lr_scale": 0.2
+        "epochs": 100
       },
       "4": {
-        "epochs": 100,
-        "lr_scale": 0.2
+        "epochs": 100
       },
       "6": {
-        "epochs": 100,
-        "lr_scale": 0.2
-      },
-      "8": {
-        "epochs": 100,
-        "lr_scale": 0.2
+        "epochs": 100
       }
     },
     "lamp": {
       "2": {
-        "epochs": 100,
-        "lr_scale": 0.5
+        "epochs": 100
       },
       "4": {
-        "epochs": 100,
-        "lr_scale": 0.5
+        "epochs": 100
       },
       "6": {
-        "epochs": 100,
-        "lr_scale": 0.5
-      },
-      "8": {
-        "epochs": 100,
-        "lr_scale": 0.5
+        "epochs": 100
       }
     },
     "lista_ann": {
       "2": {
-        "epochs": 100,
-        "lr_scale": 0.5
+        "epochs": 100
       },
       "4": {
-        "epochs": 100,
-        "lr_scale": 0.5
+        "epochs": 100
       },
       "6": {
-        "epochs": 100,
-        "lr_scale": 0.5
-      },
-      "8": {
-        "epochs": 100,
-        "lr_scale": 0.5
+        "epochs": 100
       }
     },
     "lista_snn_1": {
       "2": {
-        "epochs": 100,
-        "lr_scale": 0.2
+        "epochs": 100
       },
       "4": {
-        "epochs": 100,
-        "lr_scale": 0.2
+        "epochs": 100
       },
       "6": {
-        "epochs": 100,
-        "lr_scale": 0.2
-      },
-      "8": {
-        "epochs": 100,
-        "lr_scale": 0.2
+        "epochs": 100
       }
     }
   },
-  "final_slista": {
-    "epochs": 200,
-    "lr_p": 0.0006,
-    "lr_pd": 0.00015,
-    "lr_phi": 0.00045,
-    "lr_dictionary": 0.0009
+  "lr_scale": {
+    "fixed": {
+      "alista": 5.0,
+      "lamp": 1.0,
+      "lista_ann": 1.0,
+      "lista_snn_1": 2.0
+    },
+    "learned": {
+      "alista": 0.2,
+      "lamp": 0.5,
+      "lista_ann": 0.5,
+      "lista_snn_1": 0.5
+    }
+  },
+  "lr_search": {
+    "seed": 42,
+    "split": "validation",
+    "ladder": [
+      0.005,
+      0.01,
+      0.02,
+      0.05,
+      0.1,
+      0.2,
+      0.5,
+      1.0,
+      2.0,
+      5.0,
+      10.0,
+      20.0
+    ],
+    "initial": [
+      0.05,
+      0.1,
+      0.2,
+      0.5,
+      1.0,
+      2.0
+    ],
+    "epochs": {
+      "fixed": 100,
+      "learned": 100
+    }
   },
   "seeds": [
     42,

@@ -1,3 +1,9 @@
+"""Settings of the SHD experiments.
+
+Importing this module applies configs/slista.json (the selected S-LISTA
+settings) and creates the results folder.  main.py sets the
+experiment-specific values before a model is built.
+"""
 import os
 from pathlib import Path
 import torch
@@ -6,7 +12,8 @@ import math
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 class Config:
-    CODE_VERSION = "shd-awgn-formal-5seed-v8-robust-slista"
+    """Global settings read by the sensor, the channel, the models and the trainer."""
+    CODE_VERSION = "shd-slista"
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -70,17 +77,48 @@ class Config:
     TX_RHO = 0.1
     DECODER_TAU = 0.3
 
-    # Formal SNN operating points selected by independent pilots.
+    # SNN operating points.
     SENSING_NORMALIZATION = "energy"
-    # Selected by the sequential S-LISTA robustness pilot.  The pilot keeps
-    # ACC@10 dB unchanged while improving mean ACC over -5--5 dB.
-    SLISTA_TX_THRESHOLD = 0.75
+    SLISTA_TX_THRESHOLD = 0.4     # selected value
     SCNN_TX_THRESHOLD = 1.5
     SCNN_NEURON_THRESHOLD = 0.8
     SCNN_LEAK = 0.06
     SCNN_SURROGATE_TAU = 0.30
+    # Decoder settings of the spiking branch of HybridLISTA (not used; its ANN
+    # branch is ANN LISTA).  S-LISTA uses the SLISTA_* settings below.
     SLISTA_DECODER_TAU = 0.3
     SLISTA_SURROGATE_TAU = 0.7
+
+    # ---------------- S-LISTA (see SpikingLISTA) ---------------------------
+    # L = NUM_LAYERS = (L-1) spiking layers + 1 non-spiking readout layer.
+    # Initial thresholds: theta_1 = KAPPA*sigma, theta_{L-1} = BETA*sigma,
+    # geometric in between; eta_init = 1/theta_{L-1}.  sigma = std of
+    # P y over a training batch, active (non-silent) received frames only.
+    SLISTA_KAPPA = 2.5
+    SLISTA_BETA = 2.0
+    SLISTA_ALPHA = 0.3            # boxcar surrogate half-width = ALPHA*theta_l
+    SLISTA_RHO = 0.0              # membrane memory of the spiking layers
+    SLISTA_THRESHOLD_FLOOR = 0.01
+    # lambda_s / (L-1) * sum_l ||z^(l)||_1 / n.
+    SLISTA_LAMBDA_S = 0.1
+    SLISTA_LR_SCALE = 1.0         # multiplies recon, sensor and dictionary LRs
+    SLISTA_THETA_LR_RATIO = 0.3   # threshold LR = ratio * recon LR
+    SLISTA_G_LR_RATIO = 0.5       # G LR = ratio * recon LR
+    SLISTA_CALIBRATION_SEED = 2025
+    SLISTA_CALIBRATION_SAMPLES = 512
+    SLISTA_OVERRIDABLE = (
+        "SLISTA_KAPPA", "SLISTA_BETA", "SLISTA_ALPHA", "SLISTA_RHO",
+        "SLISTA_LAMBDA_S", "SLISTA_LR_SCALE", "SLISTA_THETA_LR_RATIO",
+        "SLISTA_G_LR_RATIO", "SLISTA_TX_THRESHOLD", "SLISTA_SEMANTIC_WEIGHT",
+        "SLISTA_WEIGHT_DECAY_P", "SLISTA_WEIGHT_DECAY_G",
+    )
+    # L2 weight decay (Adam) on the spiking read-in P and recurrent G only;
+    # thresholds, eta, dictionary and semantic head are not decayed.
+    SLISTA_WEIGHT_DECAY_P = 1e-2  # selected value
+    SLISTA_WEIGHT_DECAY_G = 0.0
+    # Task-supervision weight of S-LISTA's joint objective (the ablations
+    # "without task supervision" keep 0).
+    SLISTA_SEMANTIC_WEIGHT = 3.0
     SCNN_DECODER_TAU = 0.06
     GENERIC_SNN_TX_THRESHOLD = 2.0
     GENERIC_SNN_NEURON_THRESHOLD = 0.5
@@ -133,8 +171,33 @@ class Config:
     DOWNSTREAM_TCN_DIM = 384
     DOWNSTREAM_NORM_GROUPS = 32
     DOWNSTREAM_DROPOUT = 0.20
-    DOWNSTREAM_LABEL_SMOOTHING = 0.0
     DOWNSTREAM_INIT_SEED_OFFSET = 10000
+    # Downstream-classifier protocol:
+    # random channel shift of the reconstructed training sequences by one
+    # integer in [-40, 40] per sample (zero fill) and label smoothing 0.1;
+    # no pooling, linear input.  Pooling sums
+    # groups of adjacent reconstructed channels (700 -> 700/p) and log
+    # compression applies sign(x)*log(1+|x|), both inside the classifier.
+    DOWNSTREAM_LABEL_SMOOTHING = 0.1
+    DOWNSTREAM_CHANNEL_SHIFT = 40
+    DOWNSTREAM_CHANNEL_POOL = 1
+    DOWNSTREAM_LOG_INPUT = False
+
+    @staticmethod
+    def classifier_protocol():
+        """Tag of the downstream-classifier protocol, used in checkpoint
+        names and result rows."""
+        parts = []
+        if int(Config.DOWNSTREAM_CHANNEL_POOL) > 1:
+            parts.append(f"pool{int(Config.DOWNSTREAM_CHANNEL_POOL)}")
+        if Config.DOWNSTREAM_LOG_INPUT:
+            parts.append("log")
+        if int(Config.DOWNSTREAM_CHANNEL_SHIFT) > 0:
+            parts.append(f"shift{int(Config.DOWNSTREAM_CHANNEL_SHIFT)}")
+        if float(Config.DOWNSTREAM_LABEL_SMOOTHING) > 0:
+            parts.append(f"ls{float(Config.DOWNSTREAM_LABEL_SMOOTHING):g}".replace(".", "p"))
+        return f"gn32_w384_{'_'.join(parts) or 'default'}_lr1em3_min1em7_ep150"
+
     PHASE4_CONFIG = {'epochs': 150, 'lr': 1e-3, 'lr_min': 1e-7, 'weight_decay': 1e-4}
 
     # Z is reported only through a qualitative class-separability plot.
@@ -254,7 +317,7 @@ class Config:
         'lr_semantic': 3e-4,
     })
     
-    RESULTS_DIR = os.environ.get("SHD_OUTPUT_DIR", os.path.join(PROJECT_ROOT, "outputs_binary"))
+    RESULTS_DIR = os.environ.get("SHD_OUTPUT_DIR", os.path.join(PROJECT_ROOT, "outputs"))
     
     @staticmethod
     def get_recon_ckpt_name(
@@ -347,6 +410,26 @@ class Config:
             )
 
     @staticmethod
+    def slista_settings():
+        return {name: float(getattr(Config, name)) for name in Config.SLISTA_OVERRIDABLE}
+
+    @staticmethod
+    def load_slista_json(path=None):
+        """Apply configs/slista.json (the selected S-LISTA settings)."""
+        import json
+        path = path or os.path.join(Config.PROJECT_ROOT, "configs", "slista.json")
+        if not os.path.isfile(path):
+            return {}
+        with open(path) as handle:
+            values = json.load(handle)
+        unknown = set(values) - set(Config.SLISTA_OVERRIDABLE)
+        if unknown:
+            raise ValueError(f"Unknown S-LISTA settings in {path}: {sorted(unknown)}")
+        for name, value in values.items():
+            setattr(Config, name, float(value))
+        return values
+
+    @staticmethod
     def get_tau(epoch, total_epochs):
         if Config.TAU_ANNEAL_TYPE == "exp":
             return Config.TAU_INIT * (Config.TAU_FINAL / Config.TAU_INIT) ** (epoch / max(1, total_epochs - 1))
@@ -395,5 +478,6 @@ class Config:
         print(f"Encoder Threshold (Fixed): {Config.ENCODER_THRESHOLD}")
         print(f"Saving Results to: {Config.RESULTS_DIR}")
         print(f"{'-'*50}\n")
-        
+
+Config.load_slista_json()
 Config.make_dir()

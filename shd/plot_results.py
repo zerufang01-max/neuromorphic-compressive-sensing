@@ -137,6 +137,12 @@ def mean_std_text(mean, std, digits=2):
     return f"{float(mean):.{digits}f} ± {float(std):.{digits}f}"
 
 
+def table_widths(columns):
+    """Wider first (name) column so long variant names are not clipped."""
+    rest = (1.0 - 0.32) / max(len(columns) - 1, 1)
+    return [0.32] + [rest] * (len(columns) - 1)
+
+
 def save_main_table(results_dir, rayleigh=False):
     frame = read_csv(results_dir, "main_rayleigh20_per_seed.csv" if rayleigh else "main_results_per_seed.csv")
     if frame.empty:
@@ -252,7 +258,52 @@ def _plot_performance_bit_frame(frame, results_dir, seed, suffix, limits):
         save_figure(figure, results_dir, output_stem)
 
 
-def plot_core_ablation(results_dir, eval_snr=None):
+def plot_bit_budget(frame, output_dir, channel="AWGN", snr=10, suffix=""):
+    """Bit-budget figures in the style of the performance-bit scatter:
+    faint points per seed, one large point (seed mean) per budget, no lines.
+    `frame` is outputs_budget/budget_per_seed.csv (dense curves only)."""
+    frame = frame[frame["Curve"].eq("dense") & frame["Model"].isin(SNN_ORDER)]
+    if frame.empty:
+        return
+    publication_style()
+    for metric, ylabel, stem in [
+        ("NMSE", "Mean NMSE (dB)", "bit_budget_nmse"),
+        ("Acc", "Reconstructed-x accuracy (%)", "bit_budget_accuracy"),
+    ]:
+        column = f"{channel} {metric} @{snr}"
+        if column not in frame or frame[column].isna().all():
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        pad = max(float(values.max() - values.min()) * 0.05, 0.1)
+        if metric == "Acc":
+            ticks = np.arange(max(0.0, min(80.0, 5.0 * np.floor((values.min() - pad) / 5.0))), 101.0, 5.0)
+        else:
+            ticks = matplotlib.ticker.MaxNLocator(nbins=6).tick_values(values.min() - pad, values.max() + pad)
+        figure, axis = plt.subplots(figsize=PANEL_SIZE)
+        for model in SNN_ORDER:
+            part = frame[frame["Model"] == model]
+            if part.empty:
+                continue
+            axis.scatter(part["Bits/Sample"] / 1000.0, part[column], s=42, marker=MARKERS[model],
+                         color=COLORS[model], linewidth=0, alpha=0.28)
+            points = part.groupby("Key", as_index=False)[["Bits/Sample", column]].mean()
+            axis.scatter(points["Bits/Sample"] / 1000.0, points[column], s=145, marker=MARKERS[model],
+                         color=COLORS[model], edgecolor="black", linewidth=0.8, label=model, zorder=3)
+        axis.set_xlabel(r"Bits/sample ($\times 10^3$)")
+        axis.set_ylabel(ylabel)
+        axis.set_yticks(ticks)
+        axis.set_ylim(ticks[0], ticks[-1])
+        axis.legend(frameon=True)
+        style_axis(axis)
+        save_figure(figure, output_dir, stem + suffix)
+
+
+# Variants left out of the paper table (temperature relaxation is a
+# gradient-flow device, not a model component).  Their rows stay in the csv data.
+ABLATION_EXCLUDE = {"Without temperature relaxation"}
+
+
+def plot_core_ablation(results_dir, eval_snr=None, exclude=ABLATION_EXCLUDE):
     frame = read_csv(results_dir, "core_ablation_per_seed.csv")
     if frame.empty:
         return
@@ -266,14 +317,15 @@ def plot_core_ablation(results_dir, eval_snr=None):
             f"available SNRs: {sorted(available.dropna().unique().tolist())}"
         )
     frame = selected
+    # Same order as Table 2 of the paper.
     order = [
-        "S-LISTA with AER",
-        "Hard surrogate",
         "Without temperature relaxation",
-        "No rate regularization",
-        "No semantic supervision",
+        "Without rate regularization",
+        "Without task supervision",
+        "S-LISTA with AER",
     ]
     order += [v for v in frame["Variant"].dropna().unique() if v not in order]
+    order = [v for v in order if v not in exclude]
     rows = []
     for variant in order:
         part = frame[frame["Variant"] == variant]
@@ -296,6 +348,7 @@ def plot_core_ablation(results_dir, eval_snr=None):
     rendered = axis.table(
         cellText=table.values, colLabels=table.columns,
         cellLoc="center", colLoc="center", loc="center",
+        colWidths=table_widths(table.columns),
     )
     rendered.auto_set_font_size(False)
     rendered.set_fontsize(12.5)
@@ -578,7 +631,7 @@ def plot_sample_analysis(results_dir, seed):
     indexed = energy.set_index("Model").loc[MODEL_ORDER]
     x = np.arange(len(MODEL_ORDER))
     width = 0.34
-    figure, axes = plt.subplots(1, 4, figsize=(16.0, 4.5))
+    figure, axes = plt.subplots(1, 4, figsize=(19.0, 5.0))
     for column, scope in enumerate(("Sender", "Reconstruction")):
         mac = indexed[f"{scope} MAC/Sample"].to_numpy() / 1e9
         ac = indexed[f"{scope} AC/Sample"].to_numpy() / 1e9
@@ -604,7 +657,7 @@ def plot_sample_analysis(results_dir, seed):
         energy_axis.set_title(
             "Sensing" if scope == "Sender" else "Reconstruction"
         )
-        energy_axis.set_ylabel(r"Analytical energy/sample ($\mu$J)")
+        energy_axis.set_ylabel(r"Energy/sample ($\mu$J)")
         style_axis(energy_axis)
     for axis in axes:
         axis.set_xticks(x)
@@ -616,6 +669,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--paper-rayleigh", action="store_true")
     parser.add_argument("--results-dir", default=Config.RESULTS_DIR)
+    parser.add_argument("--budget-dir", default=None,
+                        help="bit-budget results (default: outputs_budget next to --results-dir)")
     parser.add_argument("--analysis-seed", type=int, default=Config.DEFAULT_SEEDS[0])
     parser.add_argument("--tsne-seed", type=int, default=Config.DEFAULT_SEEDS[0])
     parser.add_argument(
@@ -631,7 +686,7 @@ def main():
     if args.paper_rayleigh:
         args.results_dir = os.path.join(args.results_dir, 'rayleigh_paper')
         if args.figures == ['all']:
-            args.figures = ['ablation', 'semantic', 'tsne', 'analysis']
+            args.figures = ['ablation', 'semantic', 'analysis']
     selected = set(args.figures)
     all_figures = "all" in selected
     if all_figures or "main" in selected:
@@ -647,12 +702,20 @@ def main():
     if all_figures or "snr" in selected:
         plot_snr_robustness(args.results_dir)
     if all_figures or "performance_bit" in selected:
-        plot_performance_bit(args.results_dir)
+        # Fig. 4i,l: the bit-budget experiment (dense transmission, AWGN 10 dB).
+        budget_dir = args.budget_dir or os.path.join(os.path.dirname(os.path.abspath(args.results_dir)),
+                                                     "outputs_budget")
+        budget = os.path.join(budget_dir, "budget_per_seed.csv")
+        if os.path.isfile(budget):
+            plot_bit_budget(pd.read_csv(budget), args.results_dir, "AWGN", 10)
+        else:
+            print(f"[Pending] bit-budget figure: run budget.py first ({budget} missing)")
     if all_figures or "ablation" in selected:
         plot_core_ablation(args.results_dir, eval_snr=20.0 if args.paper_rayleigh else None)
     if all_figures or "semantic" in selected:
         plot_semantic_robustness(args.results_dir)
-    if all_figures or "tsne" in selected:
+    if "tsne" in selected:
+        # Not in the paper; only drawn when asked for.
         plot_tsne(args.results_dir, args.tsne_seed)
     if all_figures or "analysis" in selected:
         plot_sample_analysis(args.results_dir, args.analysis_seed)

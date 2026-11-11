@@ -1,3 +1,10 @@
+"""Training and evaluation of the SHD experiments.
+
+Trainer trains the sensor and the reconstruction model jointly through the
+channel (train_dynamic_recon), calibrates the initial S-LISTA thresholds,
+trains the downstream classifier on reconstructed sequences and computes the
+reported metrics.
+"""
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,7 +15,31 @@ import csv
 from config import Config
 import utils
 
+
+def channel_shift(x, shifts):
+    """Move all channels of sample b by shifts[b] (positive = towards higher
+    channel indices) on [B, T, C], filling vacated channels with zeros."""
+    batch, steps, channels = x.shape
+    source = (
+        torch.arange(channels, device=x.device).unsqueeze(0)
+        - shifts.to(x.device).long().unsqueeze(1)
+    )
+    valid = (source >= 0) & (source < channels)
+    index = source.clamp(0, channels - 1).unsqueeze(1).expand(batch, steps, channels)
+    return torch.gather(x, 2, index) * valid.unsqueeze(1).to(x.dtype)
+
+
+def random_channel_shift(x, max_shift):
+    """One integer shift per sample, uniform in [-max_shift, max_shift]."""
+    if int(max_shift) <= 0:
+        return x
+    shifts = torch.randint(
+        -int(max_shift), int(max_shift) + 1, (x.shape[0],), device=x.device
+    )
+    return channel_shift(x, shifts)
+
 class Trainer:
+    """Joint training of sensor and reconstruction model, downstream classifier and evaluation."""
     def __init__(self, model, edge_sensor, wireless_channel, train_loader, val_loader):
         self.model = model
         self.sensor = edge_sensor
@@ -33,6 +64,155 @@ class Trainer:
 
     def _preprocess_batch(self, x_batch):
         return x_batch
+
+    def _is_spiking_lista(self):
+        return self.model.__class__.__name__ == 'SpikingLISTA'
+
+    @torch.no_grad()
+    def calibrate_spiking_lista(self, mode='spiking', total_epochs=1):
+        """Set the initial S-LISTA thresholds from data (once, before training).
+
+        A fixed subset of training samples is passed through the initialised
+        sensor and the training channel (evaluation mode, hard decisions, fixed
+        noise seed).  sigma is computed over all coordinates of the received
+        frames that contain at least one spike: silent frames give exactly
+        zero current and would otherwise tie sigma to the silence fraction."""
+        rng_state = utils.capture_rng_state()
+        sensor_was_training = self.sensor.training
+        channel_was_training = self.channel.training
+        try:
+            seed = int(Config.SLISTA_CALIBRATION_SEED)
+            utils.deterministic_eval(seed)
+            self.sensor.eval()
+            self.channel.eval()
+            dataset = self.train_loader.dataset
+            generator = torch.Generator().manual_seed(seed)
+            count = min(int(Config.SLISTA_CALIBRATION_SAMPLES), len(dataset))
+            indices = torch.randperm(len(dataset), generator=generator)[:count]
+            if hasattr(dataset, 'x'):
+                indices = indices.to(dataset.x.device)
+            x_batch, _ = dataset[indices]
+            x_batch = self._preprocess_batch(x_batch)
+            frames = []
+            sensor_state = None
+            channel_state = None
+            tau = Config.get_tau(0, total_epochs)
+            for t in range(x_batch.shape[1]):
+                y_encoded, sensor_state, aux = self.sensor(
+                    x_batch[:, t], state=sensor_state, mode=mode, tau=tau
+                )
+                received, channel_state = self.channel(
+                    y_encoded,
+                    state=channel_state,
+                    mode=mode,
+                    tx_prob=aux.get('tx_prob'),
+                    tx_hard=aux.get('tx_hard'),
+                    tx_aux=aux,
+                )
+                frames.append(received.detach())
+            frames = torch.cat(frames, dim=0)
+            active = frames.abs().sum(dim=1) > 0
+            stats = self.model.calibrate(frames[active])
+            stats['active_frame_fraction'] = float(active.float().mean())
+            stats['calibration_samples'] = int(count)
+        finally:
+            utils.restore_rng_state(rng_state)
+            self.sensor.train(sensor_was_training)
+            self.channel.train(channel_was_training)
+        theta_text = ', '.join(f'{value:.4f}' for value in stats['theta_init'])
+        print(
+            f" -> S-LISTA calibration: sigma={stats['sigma']:.4f} | "
+            f"active frames {100 * stats['active_frame_fraction']:.1f}% | "
+            f"theta_init=[{theta_text}] | eta_init={stats['eta_init']:.4f}",
+            flush=True,
+        )
+        return stats
+
+    @torch.no_grad()
+    def slista_diagnostics(self, mode='spiking'):
+        """S-LISTA activity on the evaluation loader at the current channel
+        setting (deterministic noise).  Rates are computed with L-1
+        spiking layers and two spike pathways."""
+        if not self._is_spiking_lista():
+            return {}
+        utils.deterministic_eval()
+        self.model.eval()
+        self.sensor.eval()
+        self.channel.eval()
+        layers = self.model.spiking_layers
+        n = self.model.sparse_dim
+        layer_spikes = np.zeros(layers)
+        layer_positive = np.zeros(layers)
+        opposite = 0.0
+        later_spikes = 0.0
+        support = 0.0
+        ac = 0.0
+        mac = 0.0
+        frames = 0
+        samples = 0
+        for x_batch, _ in self.val_loader:
+            x_batch = self._preprocess_batch(x_batch)
+            batch, steps, _ = x_batch.shape
+            model_states = sensor_state = channel_state = None
+            for t in range(steps):
+                y_encoded, sensor_state, aux = self.sensor(
+                    x_batch[:, t], state=sensor_state, mode=mode
+                )
+                received, channel_state = self.channel(
+                    y_encoded, state=channel_state, mode=mode,
+                    tx_prob=aux.get('tx_prob'), tx_hard=aux.get('tx_hard'),
+                    tx_aux=aux,
+                )
+                _, _, model_states, _ = self.model(received, states=model_states)
+                trace = self.model.last_trace
+                counts = self.model.operation_counts(received, trace, n)
+                ac += counts['ac']
+                mac += counts['mac']
+                support += float(trace['mask'].sum())
+                for index, spike in enumerate(trace['spikes']):
+                    layer_spikes[index] += float(spike.abs().sum())
+                    layer_positive[index] += float((spike > 0).sum())
+                    if index > 0:
+                        previous = trace['spikes'][index - 1]
+                        opposite += float(((spike * previous) < 0).sum())
+                        later_spikes += float(spike.abs().sum())
+                frames += batch
+            samples += batch
+        denominator = 2.0 * n * max(frames, 1)
+        result = {
+            'Firing Rate': float(layer_spikes.sum() / (denominator * layers)),
+            'Oscillation Ratio': float(opposite / max(later_spikes, 1.0)),
+            'Support/Frame': float(support / max(frames, 1)),
+            'Recon AC/Sample': float(ac / max(samples, 1)),
+            'Recon MAC/Sample': float(mac / max(samples, 1)),
+            'Recon Energy (uJ/Sample)': float(
+                (0.9 * ac + 4.6 * mac) / max(samples, 1) / 1e6
+            ),
+            'Eta': float(self.model.eta.detach()),
+            'Rho': float(self.model.rho),
+            'Calibration Sigma': float(self.model.calibration_sigma),
+        }
+        for index in range(layers):
+            result[f'Rate L{index + 1}'] = float(layer_spikes[index] / denominator)
+            result[f'Positive Share L{index + 1}'] = float(
+                layer_positive[index] / max(layer_spikes[index], 1.0)
+            )
+        thetas = list(self.model.threshold_values())
+        for index, value in enumerate(thetas):
+            result[f'Theta L{index + 1}'] = value
+        # Per-flip current relative to the threshold it drives: one flipped
+        # input bit moves layer-1 currents by a column of P, one flipped spike
+        # in layer k moves layer-(k+1) currents by a column of G[k].  Weight
+        # decay (P, G) with undecayed thresholds should lower these ratios.
+        with torch.no_grad():
+            p_col = self.model.P.weight.norm(dim=0).mean().item()
+            g_col = [g.weight.norm(dim=0).mean().item() for g in self.model.G]
+            result['P Norm'] = float(self.model.P.weight.norm().item())
+            result['G Norm'] = float(sum(g.weight.norm().item() ** 2 for g in self.model.G) ** 0.5)
+            result['P Col/Theta L1'] = float(p_col / thetas[0])
+            ratios = [g_col[k] / thetas[k + 1] for k in range(len(thetas) - 1)]
+            result['G Col/Theta'] = float(np.mean(ratios)) if ratios else float('nan')
+        return result
 
     def _process_reconstruction(self, x_input, model_states=None, sensor_state=None, channel_state=None, mode='ann', tau=None):
         y_encoded, next_sensor_state, aux_dict = self.sensor(x_input, state=sensor_state, mode=mode, tau=tau)
@@ -64,11 +244,17 @@ class Trainer:
         is_hybrid_lista = (
             self.model.__class__.__name__ == 'HybridLISTA'
         )
+        is_spiking_lista = self._is_spiking_lista()
         for name, param in self.model.named_parameters():
             if name.startswith('classifier.'):
                 # Phase 3 never uses the downstream head.  Keeping it frozen
                 # avoids needless optimizer bookkeeping; Phase 4 re-enables it.
                 param.requires_grad = False
+            elif is_spiking_lista and not name.startswith('semantic_head.'):
+                # S-LISTA: P, G, thresholds, eta and the dictionary are
+                # all trained.  (The generic 'theta'/'thresh' rule below must
+                # not apply to its learnable thresholds.)
+                param.requires_grad = True
             elif (
                 is_hybrid_lista
                 and mode == 'spiking'
@@ -303,7 +489,15 @@ class Trainer:
             Config.RESULTS_DIR, f"annealing_stats_{model_name.lower()}.csv"
         )
         anneal_history = []
-        
+
+        calibration_stats = None
+        if self._is_spiking_lista():
+            # Training always starts from scratch on SHD, so the data-driven
+            # threshold initialisation is done exactly once, here.
+            calibration_stats = self.calibrate_spiking_lista(
+                mode=mode, total_epochs=hp['epochs']
+            )
+
         param_groups = self.model.get_optimizer_groups(hp)
         
         if not freeze_sensor:
@@ -450,15 +644,20 @@ class Trainer:
                             )
                         total_steps += 1
                         
-                        l1_norm_sum = 0
-                        for l in layers:
-                            l1_norm_sum += l.abs().sum(dim=1).mean()
-                        l1_norm_sum /= len(layers)
-
-                        if mode == 'ann':
-                            step_sparsity_loss = getattr(Config, 'ALPHA_L1_ANN', 1e-7) * l1_norm_sum
+                        if hasattr(self.model, 'sparsity_penalty'):
+                            # S-LISTA: integer codes of the L-1 spiking
+                            # layers only, lambda_s/(L-1) * sum ||z||_1 / n.
+                            step_sparsity_loss = self.model.sparsity_penalty(layers)
                         else:
-                            step_sparsity_loss = getattr(Config, 'ALPHA_L1_SNN', 1e-7) * l1_norm_sum
+                            l1_norm_sum = 0
+                            for l in layers:
+                                l1_norm_sum += l.abs().sum(dim=1).mean()
+                            l1_norm_sum /= len(layers)
+
+                            if mode == 'ann':
+                                step_sparsity_loss = getattr(Config, 'ALPHA_L1_ANN', 1e-7) * l1_norm_sum
+                            else:
+                                step_sparsity_loss = getattr(Config, 'ALPHA_L1_SNN', 1e-7) * l1_norm_sum
 
                         if semantic_enabled:
                             semantic_z_sequence.append(layers[-1])
@@ -778,6 +977,17 @@ class Trainer:
                         getattr(Config, 'SLISTA_P_WEIGHT_DECAY', 0.0)
                     ),
                     'slista_p_regularized_parameter': 'P_snn.weight',
+                    'slista': (
+                        {
+                            'settings': Config.slista_settings(),
+                            'calibration': calibration_stats,
+                            'thresholds': self.model.threshold_values(),
+                            'eta': float(self.model.eta.detach()),
+                            'readout': 'eta_gated_memoryless',
+                        }
+                        if self._is_spiking_lista() else None
+                    ),
+                    'tau_anneal_type': str(Config.TAU_ANNEAL_TYPE),
                 }, save_path)
 
             if (epoch + 1) % semantic_eval_interval == 0 or epoch == 0:
@@ -801,6 +1011,14 @@ class Trainer:
                     theta_values = self.model.get_ann_threshold_values()
                     theta_text = ', '.join(f'{value:.4f}' for value in theta_values)
                     print(f" -> ANN LISTA thresholds: [{theta_text}]")
+                if self._is_spiking_lista():
+                    theta_text = ', '.join(
+                        f'{value:.4f}' for value in self.model.threshold_values()
+                    )
+                    print(
+                        f" -> S-LISTA thresholds: [{theta_text}] | "
+                        f"eta={float(self.model.eta.detach()):.4f}"
+                    )
                 if mode == 'spiking' and Config.LOG_TX_STATE_STATS and epoch_tx_stats['total'] > 0:
                     assist_ratio = epoch_tx_stats['assisted'] / epoch_tx_stats['total']
                     state_contribution = epoch_tx_stats['state_contrib_sum'] / (epoch_tx_stats['threshold'] * epoch_tx_stats['total'])
@@ -1082,6 +1300,11 @@ class Trainer:
         if hasattr(self.model, 'mode'): 
             self.model.mode = 'rate' if mode == 'ann' else 'spiking'
         
+        # Protocol options are read at the start of every classifier run, so
+        # one Trainer can train classifiers under different protocols.
+        label_smoothing = float(getattr(Config, 'DOWNSTREAM_LABEL_SMOOTHING', 0.0))
+        max_shift = int(getattr(Config, 'DOWNSTREAM_CHANNEL_SHIFT', 0))
+        self.criterion_cls = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         optimizer = optim.Adam(classifier_module.parameters(), lr=hp['lr'], weight_decay=hp['weight_decay'])
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=hp['epochs'], eta_min=hp['lr_min'])
         
@@ -1106,10 +1329,12 @@ class Trainer:
                 
                 optimizer.zero_grad(set_to_none=True)
                 x_stack = self._make_classifier_input(x_batch, mode=mode, target=target)
-                
+                # Augmentation acts on the (frozen) reconstruction only.
+                x_stack = random_channel_shift(x_stack, max_shift)
+
                 logits = classifier_module(x_stack)
                 loss = self.criterion_cls(logits, labels)
-                
+
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(classifier_module.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -1141,8 +1366,13 @@ class Trainer:
                     'downstream_dropout': float(
                         Config.DOWNSTREAM_DROPOUT
                     ),
-                    'downstream_label_smoothing': float(
-                        Config.DOWNSTREAM_LABEL_SMOOTHING
+                    'downstream_label_smoothing': label_smoothing,
+                    'downstream_channel_shift': max_shift,
+                    'downstream_channel_pool': int(
+                        getattr(classifier_module, 'channel_pool', 1)
+                    ),
+                    'downstream_log_input': bool(
+                        getattr(classifier_module, 'log_input', False)
                     ),
                 }, save_path)
             

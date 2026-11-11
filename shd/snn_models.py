@@ -1,3 +1,12 @@
+"""Reconstruction models and classifier of the SHD experiments.
+
+- SpikingLISTA: S-LISTA (L-1 spiking layers and a non-spiking readout layer).
+- HybridLISTA: ANN LISTA (mode 'rate').
+- LSTMRecon: ANN LSTM baseline.
+- SpikingDenseRecon: Vanilla SNN baseline.
+- TemporalConvClassifier: task head on the codes and downstream classifier on
+  the reconstructed sequences.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +16,7 @@ from config import Config
 SHD_FULL_NO_TEMPERATURE_VERSION = 1
 
 class SurrogateSpike(torch.autograd.Function):
+    """Heaviside spike with a rectangular surrogate gradient of half-width 0.5."""
     @staticmethod
     def forward(ctx, input, threshold):
         if not isinstance(threshold, torch.Tensor):
@@ -38,6 +48,7 @@ def _orient_sequence(x, input_dim):
 
 
 class AttentiveTemporalPool(nn.Module):
+    """Attention-weighted average over the time axis."""
     def __init__(self, feature_dim):
         super().__init__()
         self.score = nn.Linear(int(feature_dim), 1)
@@ -55,6 +66,7 @@ class AttentiveTemporalPool(nn.Module):
 
 
 class TemporalResidualBlock(nn.Module):
+    """Dilated 1-D convolutional residual block."""
     def __init__(self, channels, dilation, dropout, norm_groups=None):
         super().__init__()
         channels = int(channels)
@@ -93,12 +105,20 @@ class TemporalConvClassifier(nn.Module):
         dropout=0.20,
         dilations=(1, 2, 4),
         norm_groups=32,
+        channel_pool=1,
+        log_input=False,
         **kwargs,
     ):
         super().__init__()
         self.input_dim = int(input_dim)
+        self.channel_pool = int(channel_pool)
+        self.log_input = bool(log_input)
+        if self.channel_pool < 1 or self.input_dim % self.channel_pool:
+            raise ValueError(
+                f"channel_pool={channel_pool} must divide input_dim={input_dim}."
+            )
         self.frame_projection = nn.Linear(
-            self.input_dim, int(frame_dim)
+            self.input_dim // self.channel_pool, int(frame_dim)
         )
         self.temporal = nn.Sequential(*[
             TemporalResidualBlock(frame_dim, dilation, dropout, norm_groups=norm_groups)
@@ -114,8 +134,19 @@ class TemporalConvClassifier(nn.Module):
             nn.Linear(256, int(num_classes)),
         )
 
+    def preprocess(self, x):
+        """Fixed front end on [B, T, input_dim]: channel pooling (sum over
+        groups of adjacent channels), then sign(x)*log(1+|x|).  Identity with
+        the default settings."""
+        if self.channel_pool > 1:
+            batch, steps, _ = x.shape
+            x = x.reshape(batch, steps, -1, self.channel_pool).sum(dim=-1)
+        if self.log_input:
+            x = torch.sign(x) * torch.log1p(torch.abs(x))
+        return x
+
     def forward(self, x):
-        x = _orient_sequence(x, self.input_dim)
+        x = self.preprocess(_orient_sequence(x, self.input_dim))
         features = F.gelu(self.frame_projection(x))
         features = self.temporal(
             features.transpose(1, 2)
@@ -124,6 +155,7 @@ class TemporalConvClassifier(nn.Module):
 
 
 class HybridLISTA(nn.Module):
+    """ANN LISTA: FC input mapping W_e, FC updates S_k and learnable soft thresholds."""
     def __init__(self):
         super().__init__()
         self.K = Config.NUM_LAYERS
@@ -361,7 +393,301 @@ class HybridLISTA(nn.Module):
         }
         return x_recon, layers_out, next_states, internal_stats
 
+def inverse_softplus(value):
+    value = float(value)
+    return value + math.log(-math.expm1(-value))
+
+
+class BoxcarSpike(torch.autograd.Function):
+    """Heaviside H(x - theta) with a boxcar surrogate of half-width ``width``.
+
+    The surrogate derivative is passed to both x and theta
+    (d/dtheta = -d/dx), so the per-layer thresholds are trainable."""
+
+    @staticmethod
+    def forward(ctx, x, theta, width):
+        ctx.save_for_backward(x, theta, width)
+        return (x >= theta).to(x.dtype)
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, theta, width = ctx.saved_tensors
+        surrogate = grad * ((x - theta).abs() < width).to(grad.dtype)
+        return surrogate, -surrogate.sum().reshape(theta.shape), None
+
+
+class SpikingLISTA(nn.Module):
+    """S-LISTA for SHD (multi-time-step form).
+
+    Per frame t, with I^(1)_t = P y_t and z^(0)_t = 0:
+        for l = 1 .. L-1  (spiking layers, membrane memory rho)
+            u_bar  = rho * u^(l)_{t-1} + I^(l)_t
+            xi     = H(u_bar - theta_l) - H(-u_bar - theta_l)
+            u^(l)_t = u_bar - theta_l * xi              (soft reset)
+            z^(l)  = z^(l-1) + xi
+            I^(l+1)_t = I^(1)_t - G^(l) z^(l)
+        readout layer L (non-spiking, memoryless in time)
+            m   = 1[z^(L-1) != 0]                       (per-frame event gate)
+            z_t = z^(L-1) + eta * m * I^(L)_t
+        x_hat_t = ReLU(D z_t)
+
+    theta_l = floor + softplus(r_l) and eta = softplus(r_eta) are trained.
+    The surrogate gradient of layer l is a boxcar of half-width alpha*theta_l
+    and is also passed to theta_l.  ``trace`` is the single forward
+    implementation used for training, evaluation and diagnostics.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.mode = 'spiking'
+        self.meas_dim = int(Config.MEAS_DIM)
+        self.sparse_dim = int(Config.SPARSE_DIM)
+        self.n = self.sparse_dim
+        self.depth = int(Config.NUM_LAYERS)
+        if self.depth < 2:
+            raise ValueError('S-LISTA needs at least one spiking layer and the readout layer.')
+        self.spiking_layers = self.depth - 1
+        self.kappa = float(Config.SLISTA_KAPPA)
+        self.beta = float(Config.SLISTA_BETA)
+        self.alpha = float(Config.SLISTA_ALPHA)
+        self.lambda_s = float(Config.SLISTA_LAMBDA_S)
+        # Buffers are saved in the checkpoint, so each model carries the
+        # values it was trained with.
+        self.register_buffer('rho', torch.tensor(float(Config.SLISTA_RHO)))
+        self.register_buffer(
+            'threshold_floor', torch.tensor(float(Config.SLISTA_THRESHOLD_FLOOR))
+        )
+        self.register_buffer('calibration_sigma', torch.tensor(float('nan')))
+
+        self.P = nn.Linear(self.meas_dim, self.sparse_dim, bias=False)
+        self.G = nn.ModuleList(
+            nn.Linear(self.sparse_dim, self.sparse_dim, bias=False)
+            for _ in range(self.spiking_layers)
+        )
+        # Placeholders; calibrate() sets the actual initial values.  The
+        # names avoid the substrings 'theta'/'thresh' on purpose.
+        self.raw_level = nn.Parameter(torch.zeros(self.spiking_layers))
+        self.raw_eta = nn.Parameter(torch.zeros(()))
+
+        self.synthesis_dict = nn.Linear(self.sparse_dim, Config.INPUT_DIM, bias=False)
+        self.semantic_head = TemporalConvClassifier(
+            input_dim=self.sparse_dim,
+            num_classes=Config.NUM_CLASSES,
+            frame_dim=Config.SEMANTIC_TCN_DIM,
+            norm_groups=Config.SEMANTIC_NORM_GROUPS,
+            dropout=Config.SEMANTIC_DROPOUT,
+        )
+        self.last_trace = None
+        self._init_weights()
+
+    def _init_weights(self):
+        # P and G follow the reference implementation.  The dictionary and
+        # the task head keep the orthogonal(0.5) initialization used by the
+        # original SHD HybridLISTA.
+        with torch.no_grad():
+            nn.init.kaiming_uniform_(self.P.weight, a=math.sqrt(5))
+            for layer in self.G:
+                nn.init.kaiming_uniform_(layer.weight, a=math.sqrt(5))
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Linear) and name != 'P' and not name.startswith('G.'):
+                nn.init.orthogonal_(module.weight, gain=0.5)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Checkpoints written before the threshold parameter was renamed.
+        legacy, current = prefix + 'raw_vartheta', prefix + 'raw_level'
+        if legacy in state_dict and current not in state_dict:
+            state_dict[current] = state_dict.pop(legacy)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    # ------------------------------------------------------------ parameters
+    @property
+    def vartheta(self):
+        return self.threshold_floor + F.softplus(self.raw_level)
+
+    @property
+    def eta(self):
+        return F.softplus(self.raw_eta)
+
+    def threshold_values(self):
+        return [float(v) for v in self.vartheta.detach().cpu()]
+
+    @torch.no_grad()
+    def calibrate(self, received_frames):
+        """Initial thresholds theta_1 = kappa*sigma, theta_{L-1} = beta*sigma,
+        geometric in between; eta = 1/theta_{L-1}.  sigma is the standard
+        deviation of I^(1) = P y over all coordinates of the given received
+        frames (the caller passes frames that contain at least one spike)."""
+        if received_frames.numel() == 0:
+            raise RuntimeError('S-LISTA calibration received no active frames.')
+        current = self.P(received_frames.to(self.P.weight.dtype))
+        sigma = float(current.std())
+        if not math.isfinite(sigma) or sigma <= 0.0:
+            raise RuntimeError(f'Invalid S-LISTA calibration sigma: {sigma}')
+        first, last = self.kappa * sigma, self.beta * sigma
+        if self.spiking_layers == 1:
+            values = [first]
+        else:
+            ratio = (last / first) ** (1.0 / (self.spiking_layers - 1))
+            values = [first * ratio ** k for k in range(self.spiking_layers)]
+        floor = float(self.threshold_floor)
+        if min(values) <= floor:
+            raise RuntimeError(
+                f'Calibrated thresholds {values} fall below the floor {floor}.'
+            )
+        self.raw_level.copy_(torch.tensor(
+            [inverse_softplus(v - floor) for v in values],
+            dtype=self.raw_level.dtype,
+        ))
+        self.raw_eta.copy_(torch.tensor(
+            inverse_softplus(1.0 / values[-1]), dtype=self.raw_eta.dtype
+        ))
+        self.calibration_sigma.fill_(sigma)
+        return {
+            'sigma': sigma,
+            'kappa': self.kappa,
+            'beta': self.beta,
+            'alpha': self.alpha,
+            'rho': float(self.rho),
+            'theta_init': values,
+            'eta_init': 1.0 / values[-1],
+            'calibration_frames': int(received_frames.shape[0]),
+        }
+
+    # --------------------------------------------------------------- forward
+    def trace(self, y_frame, states=None):
+        """Run one frame and return every intermediate quantity.
+
+        spikes[l] = xi^(l+1), codes[l] = z^(l+1) for the L-1 spiking layers;
+        currents[l] = I^(l+1) for all L layers; mask; output z_t;
+        next_states = post-reset membranes [L-1, B, n]."""
+        theta = self.vartheta
+        width = self.alpha * theta.detach()
+        initial = self.P(y_frame)
+        if states is None:
+            states = initial.new_zeros(
+                self.spiking_layers, initial.shape[0], self.sparse_dim
+            )
+        code = torch.zeros_like(initial)
+        current = initial
+        spikes, codes, currents, next_states = [], [], [], []
+        for layer in range(self.spiking_layers):
+            currents.append(current)
+            membrane = self.rho * states[layer] + current
+            positive = BoxcarSpike.apply(membrane, theta[layer], width[layer])
+            negative = BoxcarSpike.apply(-membrane, theta[layer], width[layer])
+            spike = positive - negative
+            # Soft reset; the reset uses the hard spike value (no surrogate
+            # path through the reset), as in the original implementation.
+            next_states.append(membrane - theta[layer] * spike.detach())
+            code = code + spike
+            spikes.append(spike)
+            codes.append(code)
+            current = initial - self.G[layer](code)
+        currents.append(current)
+        mask = (code != 0).to(code.dtype)
+        output = code + self.eta * mask * current
+        return {
+            'spikes': spikes,
+            'codes': codes,
+            'currents': currents,
+            'v': current,
+            'mask': mask,
+            'spike_code': code,
+            'output': output,
+            'next_states': torch.stack(next_states, dim=0),
+        }
+
+    def forward(self, y_frame, states=None):
+        trace = self.trace(y_frame, states)
+        self.last_trace = trace
+        x_recon = F.relu(self.synthesis_dict(trace['output']))
+        with torch.no_grad():
+            spike_count = sum(spike.abs().sum() for spike in trace['spikes'])
+            fired_rate = spike_count / max(
+                1, 2 * y_frame.shape[0] * self.sparse_dim * self.spiking_layers
+            )
+        layers = list(trace['codes']) + [trace['output']]
+        return x_recon, layers, trace['next_states'], {'fired_rate': fired_rate}
+
+    # -------------------------------------------------- loss and op counting
+    def sparsity_penalty(self, layers):
+        """lambda_s / (L-1) * sum_l ||z^(l)||_1 / n over the L-1 spiking
+        layers, averaged over the batch.  ``layers`` is the list returned by
+        forward(); its last entry (the readout code) is excluded."""
+        codes = layers[:self.spiking_layers]
+        if self.lambda_s == 0.0:
+            return codes[0].new_zeros(())
+        l1 = torch.stack([code.abs().sum(dim=1) for code in codes]).mean(dim=0)
+        return self.lambda_s * (l1 / self.sparse_dim).mean()
+
+    @staticmethod
+    @torch.no_grad()
+    def operation_counts(y_frame, trace, n):
+        """Per-frame operation counts summed over the batch.
+
+        AC : P y on binary received spikes (n per active input) and
+             G^(l) z^(l), l = 1..L-1 (n per unit of integer code magnitude).
+        MAC: readout gain eta * v on the gated support (||m||_0).
+        The dictionary readout is excluded, as for all methods."""
+        ac_input = float(y_frame.abs().sum()) * n
+        ac_code = sum(float(code.abs().sum()) for code in trace['codes']) * n
+        return {
+            'ac': ac_input + ac_code,
+            'mac': float(trace['mask'].sum()),
+            'spikes': sum(float(spike.abs().sum()) for spike in trace['spikes']),
+        }
+
+    def get_optimizer_groups(self, hp):
+        lr = float(hp['lr_lista_snn'])
+        groups = {
+            'P': [], 'readin': [], 'G': [], 'vartheta': [], 'dict': [], 'semantic': [],
+        }
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith('semantic_head.'):
+                groups['semantic'].append(param)
+            elif name.startswith('synthesis_dict.'):
+                groups['dict'].append(param)
+            elif name.startswith('G.'):
+                groups['G'].append(param)
+            elif name == 'raw_level':
+                groups['vartheta'].append(param)
+            elif name.startswith('P.'):
+                groups['P'].append(param)
+            elif name == 'raw_eta':
+                groups['readin'].append(param)
+            else:
+                raise RuntimeError(f'Unassigned S-LISTA parameter: {name}')
+        return [
+            # Weight decay acts only on the spiking weights P and G.  Because
+            # (P, G, vartheta, 1/eta) is a scale symmetry and vartheta is not
+            # decayed, shrinking P/G lowers the input current per spike flip
+            # relative to the threshold.
+            {
+                'params': groups['P'], 'lr': lr,
+                'weight_decay': float(Config.SLISTA_WEIGHT_DECAY_P),
+            },
+            {'params': groups['readin'], 'lr': lr, 'weight_decay': 0.0},
+            {
+                'params': groups['G'],
+                'lr': lr * float(Config.SLISTA_G_LR_RATIO),
+                'weight_decay': float(Config.SLISTA_WEIGHT_DECAY_G),
+            },
+            {'params': groups['vartheta'], 'lr': lr * float(Config.SLISTA_THETA_LR_RATIO)},
+            {'params': groups['dict'], 'lr': float(hp['lr_dict'])},
+            {
+                'params': groups['semantic'],
+                'lr': float(hp['lr_semantic']),
+                'weight_decay': Config.SEMANTIC_WEIGHT_DECAY,
+            },
+        ]
+
+
 class LSTMRecon(nn.Module):
+    """ANN LSTM baseline: LSTM cell with 512 hidden units and a linear readout."""
     def __init__(self):
         super().__init__()
         self.mode = 'ann'
@@ -414,6 +740,7 @@ class LSTMRecon(nn.Module):
         return x_recon, [h_next], (h_next, c_next), {}
         
 class RegressionGLIF(nn.Module):
+    """Signed leaky integrate-and-fire layer with soft reset and a sigmoid surrogate gradient."""
     def __init__(self, channels):
         super().__init__()
         self.dt = Config.BIN_DT_SEC 
@@ -456,6 +783,7 @@ class RegressionGLIF(nn.Module):
             return spikes, V
 
 class SpikingResBlockFC(nn.Module):
+    """Residual block of two fully connected spiking layers."""
     def __init__(self, channels):
         super().__init__()
         self.fc1 = nn.Linear(channels, channels, bias=True)
@@ -475,6 +803,7 @@ class SpikingResBlockFC(nn.Module):
         return out, [s1, s2]
 
 class SpikingDenseRecon(nn.Module):
+    """Vanilla SNN baseline: FC256 + LIF, FC700 + LIF, three residual blocks and a linear readout."""
     def __init__(self):
         super().__init__()
         self.mode = 'spiking'
@@ -488,8 +817,7 @@ class SpikingDenseRecon(nn.Module):
         self.head_2 = nn.Linear(self.feat_dim, self.sparse_dim, bias=False)
         self.lif_head_2 = RegressionGLIF(self.sparse_dim)
 
-        # Three event-driven residual blocks recover depth without the former
-        # 700->1700->2600 dense synthesis expansion.  Only the final dictionary
+        # Three event-driven residual blocks.  Only the final dictionary
         # projection uses MACs; all preceding synapses consume sparse ACs.
         self.res_blocks = nn.ModuleList([
             SpikingResBlockFC(self.sparse_dim) for _ in range(3)

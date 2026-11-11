@@ -1,0 +1,9 @@
+torch>=2.1
+torchvision>=0.16
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+scikit-learn>=1.3
+seaborn>=0.13
+pillow>=10.0
+spikingjelly  # only to convert DVS Gesture into 16-frame samples

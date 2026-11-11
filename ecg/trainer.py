@@ -99,11 +99,15 @@ class Trainer:
         for name, param in named_model_params:
             if name == "D" or name.endswith(".D"):
                 dictionary_params.append(param)
-            elif name == "P_snn.weight" or name.startswith("P_snn."):
+            elif self.model.mode == "spiking" and name.startswith("P."):
                 # Only the initial S-LISTA measurement-to-code projection P
                 # receives weight decay.  Applying it to the recurrent PD
                 # operators or the synthesis dictionary would change the
                 # recovery dynamics and introduce an unwanted scale bias.
+                p_params.append(param)
+            elif self.model.mode == "spiking" and name == "raw_eta":
+                # S-LISTA readout gain: same rate as P (lr_p); G has lr_pd and
+                # the firing thresholds lr_theta.
                 p_params.append(param)
             elif any(key in name for key in ["theta", "step", "eta", "gamma"]):
                 theta_params.append(param)
@@ -130,14 +134,14 @@ class Trainer:
                 "params": p_params,
                 "lr": cfg.get("lr_p", cfg.get("lr_model", 5e-4)),
                 "weight_decay": cfg.get("p_weight_decay", 0.0),
-                "group_name": "P_snn",
+                "group_name": "P",
             })
         if weight_params:
             param_groups.append({
                 "params": weight_params,
                 "lr": cfg.get("lr_pd", cfg.get("lr_model", 5e-4)),
                 "weight_decay": cfg.get("weight_decay", 0.0),
-                "group_name": "PD_snn" if self.model.mode == "spiking" else "model",
+                "group_name": "G" if self.model.mode == "spiking" else "model",
             })
         if theta_params:
             param_groups.append({
@@ -150,6 +154,38 @@ class Trainer:
         optimizer = optim.Adam(param_groups)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.get("epochs", 100), eta_min=1e-6)
         return optimizer, scheduler, param_groups
+
+    @torch.no_grad()
+    def calibrate_thresholds(self):
+        """Set the S-LISTA initial thresholds and readout gain from one
+        training batch passed through the measurement and the training
+        channel (what the network actually receives).  Called only when a
+        model is trained from scratch; warm starts inherit trained values."""
+        dataset = self.train_loader.dataset
+        offset = int(Config.SLISTA_CALIBRATION_SEED)
+        generator = torch.Generator().manual_seed(int(Config.SEED) + offset)
+        count = min(int(Config.BATCH_SIZE), len(dataset))
+        index = torch.randperm(len(dataset), generator=generator)[:count]
+        x = dataset.data[index].to(self.device)
+        self.model.eval()
+        self.sensor.eval()
+        with utils.deterministic_eval(int(Config.SEED) + offset):
+            y_raw, _, _ = self.sensor(x, mode="shared")
+            y_recv, _ = self.channel(
+                y_raw, state=None, mode="shared",
+                channel_mode=Config.TRAIN_CHANNEL_MODE,
+            )
+            info = self.model.calibrate(y_recv)
+        print(
+            f"[Calibrate] sigma={info['sigma']:.4g} (MAD estimate "
+            f"{info['mad_sigma']:.4g}), kappa={info['kappa']:.3f}, "
+            f"beta={info['beta']:g}, alpha={info['alpha']:g} | theta_init="
+            + ", ".join(f"{v:.4g}" for v in info["theta_init"])
+            + f" | eta_init={info['eta_init']:.4g} | layer-1 fraction above "
+            f"theta_1 at init: {info['initial_layer1_fraction']:.4%}",
+            flush=True,
+        )
+        return info
 
     @torch.no_grad()
     def _dictionary_stats(self):
@@ -209,18 +245,11 @@ class Trainer:
                 f"_eval{Config.EVAL_CHANNEL_MODE}"
                 f"_q{Config.QUANT_BITS}"
                 f"_clip{Config.QUANT_CLIP_VALUE:g}"
-                f"_T{Config.TIME_STEPS}"
             )
-            if current_mode == "spiking":
-                channel_tag += (
-                    f"_fth{Config.FINAL_THETA_SNN:g}"
-                    f"_pwd{cfg.get('p_weight_decay', 0.0):.1e}"
-                )
-            threshold_suffix = f"_th{self.model.get_threshold_value():.2f}" if hasattr(self.model, "get_threshold_value") else ""
             save_path = os.path.join(
                 Config.RESULTS_DIR,
                 f"{Config.CODE_VERSION}_M{Config.M}_K{Config.NUM_LAYERS}_dynamic_recon_"
-                f"{current_mode}_{model_name.lower()}{threshold_suffix}_{channel_tag}.pth",
+                f"{current_mode}_{model_name.lower()}_{channel_tag}.pth",
             )
 
         if os.path.exists(save_path) and Path(save_path + ".complete").exists():
@@ -234,6 +263,17 @@ class Trainer:
             self.model.load_state_dict(checkpoint["model"], strict=True)
             self.sensor.load_state_dict(checkpoint["sensor"], strict=True)
             return self.validate_recon(mode=current_mode, channel_mode=Config.EVAL_CHANNEL_MODE)
+
+        resume_path = save_path + ".resume"
+        # S-LISTA trained from scratch: initial thresholds from sigma.  Must
+        # precede the optimizer (it overwrites raw_theta / raw_eta in place).
+        if (
+            current_mode == "spiking"
+            and hasattr(self.model, "calibrate")
+            and not Config.WARM_START_CHECKPOINT
+            and not os.path.exists(resume_path)
+        ):
+            self.calibrate_thresholds()
 
         optimizer, scheduler, param_groups = self._build_optimizer(cfg)
         self.best_nmse = float("inf")
@@ -270,9 +310,13 @@ class Trainer:
                 "lr_scale": Config.LR_SCALE,
                 "p_weight_decay": cfg.get("p_weight_decay", 0.0),
                 "warm_start_checkpoint": Config.WARM_START_CHECKPOINT,
+                "slista": {
+                    "kappa": Config.SLISTA_KAPPA, "beta": Config.SLISTA_BETA,
+                    "alpha": Config.SLISTA_ALPHA,
+                    "threshold_floor": Config.SLISTA_THRESHOLD_FLOOR,
+                } if current_mode == "spiking" else None,
             }, save_path)
 
-        resume_path = save_path + ".resume"
         start_epoch = 0
         if Config.WARM_START_CHECKPOINT and not os.path.exists(resume_path):
             self.best_nmse = self.validate_recon(
@@ -316,18 +360,20 @@ class Trainer:
                 )
                 
                 x_rec = run["recon"]
-                spike_events_sum += float(
-                    run.get("stats", {}).get("spike_events", 0.0)
-                )
-                spike_slots += (
-                    x_batch.size(0) * Config.N * Config.NUM_LAYERS
-                )
+                stats = run.get("stats", {}) or {}
+                spike_events_sum += float(stats.get("spike_events", 0.0))
+                spike_slots += float(stats.get("firing_rate_denominator", 0.0))
                 loss_mse = Config.ALPHA_MSE * self.criterion_mse(x_rec, x_batch)
-                
+
                 loss_l1 = x_rec.new_tensor(0.0)
-                if run["layers"]:
+                if current_mode == "spiking" and "trace" in stats:
+                    # Spike-rate penalty on the L-1 integer spike codes only.
+                    l1_norm_sum = self.model.spike_penalty(stats["trace"])
+                    loss_l1 = alpha_l1 * l1_norm_sum
+                elif run["layers"]:
                     l1_norm_sum = sum(layer.abs().mean() for layer in run["layers"]) / len(run["layers"])
                     loss_l1 = alpha_l1 * l1_norm_sum
+                if run["layers"]:
                     final_latent = run["layers"][-1].detach()
                     latent_zeros += int((final_latent == 0.0).sum().item())
                     latent_count += final_latent.numel()
@@ -357,7 +403,7 @@ class Trainer:
                 self.model.synchronize_dictionary_operator(
                     self.sensor.effective_phi()
                 )
-            if (epoch + 1) % 10 == 0 or epoch + 1 == cfg.get("epochs", 100):
+            if (epoch + 1) % int(Config.VAL_EVERY) == 0 or epoch + 1 == cfg.get("epochs", 100):
                 val_nmse = self.validate_recon(mode=current_mode, channel_mode=Config.EVAL_CHANNEL_MODE)
                 batches = max(len(self.train_loader), 1)
                 saved_msg = ""
@@ -398,6 +444,13 @@ class Trainer:
                     f"| Val NMSE: {val_nmse:.2f} dB"
                     f"{dictionary_text}{measurement_text}{saved_msg}"
                 )
+                if hasattr(self.model, "threshold_values"):
+                    print(
+                        "       theta: "
+                        + ", ".join(f"{v:.4g}" for v in self.model.threshold_values())
+                        + f" | eta: {float(self.model.eta):.4g}",
+                        flush=True,
+                    )
             utils.atomic_torch_save({
                 'model': self.model.state_dict(), 'sensor': self.sensor.state_dict(),
                 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
@@ -464,7 +517,9 @@ class Trainer:
         latent_near_zeros = 0
         latent_count = 0
         latent_abs_sum = 0.0
-        layer_spikes = np.zeros(Config.NUM_LAYERS, dtype=np.float64)
+        firing_slots = 0.0
+        support_sum = 0.0
+        layer_spikes = None
         
         with utils.deterministic_eval(Config.TEST_CHANNEL_SEED):
             with torch.no_grad():
@@ -487,19 +542,23 @@ class Trainer:
                         )
                         latent_count += final_latent.numel()
                         latent_abs_sum += float(final_latent.abs().sum().item())
+                    firing_slots += float(stats.get("firing_rate_denominator", 0.0))
+                    support_sum += float(stats.get("support", 0.0))
                     current_layer_spikes = stats.get("layer_spike_events", [])
-                    if len(current_layer_spikes) == Config.NUM_LAYERS:
-                        layer_spikes += np.asarray(
-                            current_layer_spikes, dtype=np.float64
-                        )
+                    if current_layer_spikes:
+                        values = np.asarray(current_layer_spikes, dtype=np.float64)
+                        layer_spikes = values if layer_spikes is None else layer_spikes + values
                 
         avg_macs = total_macs / max(total_samples, 1)
         avg_acs = total_acs / max(total_samples, 1)
         avg_spikes = total_spikes / max(total_samples, 1)
-        firing_rate = avg_spikes / max(Config.N * Config.NUM_LAYERS, 1)
+        # Firing rate: signed spikes on two channels, spiking layers only,
+        # i.e. denominator 2 * n * (L - 1) per sample.
+        firing_rate = total_spikes / firing_slots if firing_slots > 0 else 0.0
         layer_firing_rates = (
-            layer_spikes / max(total_samples * Config.N, 1)
-        ).tolist()
+            [] if layer_spikes is None
+            else (layer_spikes / max(2.0 * total_samples * Config.N, 1.0)).tolist()
+        )
         
        
         energy_uj = avg_macs * Config.E_MAC_UJ + avg_acs * Config.E_AC_UJ
@@ -512,6 +571,7 @@ class Trainer:
             "spike_events": avg_spikes,
             "firing_rate": firing_rate,
             "layer_firing_rates": layer_firing_rates,
+            "support_per_sample": support_sum / max(total_samples, 1),
             "latent_zero_fraction": latent_zeros / max(latent_count, 1),
             "latent_near_zero_fraction": (
                 latent_near_zeros / max(latent_count, 1)

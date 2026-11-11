@@ -28,7 +28,7 @@ def advance(b:Tensor,gram:Tensor,synaptic:Tensor,average:Tensor,voltage:Tensor,
         average=average*(t/(t+1.0))+(b-synaptic)/(t+1.0)
         rate=torch.relu(average-penalty)
         # Official R=tau; expose only this family so the inverse gain remains consistent.
-        # Default t_ref=0 avoids rate ceilings for the user's signed U[0,4) signals.
+        # Default t_ref=0 avoids rate ceilings for the signed U[0,4) signals.
         safe_rate=rate.clamp_min(1e-12)
         current=1.0/(resistance*(-torch.expm1((t_ref-1.0/safe_rate)/tau)))
         current=torch.where(rate>1e-7,current,torch.full_like(current,1.0/resistance))

@@ -1,3 +1,6 @@
+"""Channel of the ECG experiments: uniform quantization of the real-valued
+measurements and uncoded BPSK over AWGN with hard decisions.
+"""
 import math
 
 import torch
@@ -7,6 +10,7 @@ from config import Config
 
 
 class SignedUniformQuantizeSTE(torch.autograd.Function):
+    """Uniform quantization of clipped signed values with a straight-through gradient."""
     @staticmethod
     def forward(ctx, inputs, num_bits, clip_value):
         ctx.save_for_backward(inputs)
@@ -59,6 +63,7 @@ class SignedUniformBitAWGNHARDSTE(torch.autograd.Function):
 
 
 class WirelessChannel(nn.Module):
+    """Quantization and BPSK-AWGN transmission of the ECG measurements."""
     def __init__(self, snr_db=None):
         super().__init__()
         self.snr_db = Config.SNR_DB if snr_db is None else float(snr_db)

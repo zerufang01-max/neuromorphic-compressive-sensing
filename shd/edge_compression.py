@@ -1,3 +1,9 @@
+"""Transmitters of the SHD experiments.
+
+EdgeSensor is the linear sensing layer of the ANN baselines (700 -> 256,
+sigmoid, 8-bit quantization).  BinaryEdgeSensor is the spiking transmitter:
+bias-free linear sensing followed by an LIF neuron.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +11,7 @@ import math
 from config import Config
 
 class SurrogateSpike(torch.autograd.Function):
+    """Heaviside step with a rectangular surrogate gradient."""
     @staticmethod
     def forward(ctx, input):
         ctx.save_for_backward(input)
@@ -18,6 +25,7 @@ class SurrogateSpike(torch.autograd.Function):
         return grad_input * mask
 
 class ProbabilityUniformQuantizeSTE(torch.autograd.Function):
+    """Uniform quantization of values in [0, 1] with a straight-through gradient."""
     @staticmethod
     def forward(ctx, inputs, bits):
         bits = int(bits)
@@ -34,6 +42,7 @@ class ProbabilityUniformQuantizeSTE(torch.autograd.Function):
         return grad_output, None
 
 class EdgeSensor(nn.Module):
+    """Linear sensing layer with a quantized output (ANN baselines)."""
     def __init__(self):
         super().__init__()
         self.mode = 'ann'

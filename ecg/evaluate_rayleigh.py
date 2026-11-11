@@ -112,14 +112,10 @@ def configure(Config, args, torch):
     Config.TOTAL_MEAS_TARGET = 78
     Config.EFFECTIVE_TOTAL_MEAS = 78
     Config.NUM_LAYERS = 8
-    Config.TIME_STEPS = 1
     Config.CS_MODE = "learnable_dictionary"
     Config.QUANT_BITS = 8
     Config.QUANT_CLIP_VALUE = 3.0
     Config.BITS_PER_SAMPLE = 624
-    Config.THETA_LISTA_SNN = 1.0
-    Config.FINAL_THETA_SNN = 0.2
-    Config.SURROGATE_WIDTH = 0.5
     Config.SLISTA_INIT = "random"
     Config.TRAIN_SNR_DB = 5.0
     Config.SEED = 42
@@ -182,7 +178,7 @@ def evaluate(model, sensor, loader, snr_db, args, Config, torch):
                                   phi_override=sensor.effective_phi())
             if not bool(torch.isfinite(x_hat).all()):
                 raise RuntimeError(f"Non-finite reconstruction at SNR={snr_db}")
-            # Aggregate error energy / aggregate target energy, as in the old plot.
+            # Aggregate error energy / aggregate target energy.
             error_sum += float((x_hat - x).square().sum(dtype=torch.float64).item())
             signal_sum += float(x.square().sum(dtype=torch.float64).item())
             samples += int(x.shape[0])
@@ -221,9 +217,8 @@ def main():
     args.checkpoint_root = (args.checkpoint_root or args.output).expanduser().resolve()
     args.data_dir = (args.data_dir or args.project_dir / "data/mitdb_pt").expanduser().resolve()
     args.output_dir = (args.output_dir or args.output / "rayleigh").expanduser().resolve()
-    from plot_results import read_best_rows, read_final_slista, checkpoint_path
+    from plot_results import read_best_rows, checkpoint_path
     selected = read_best_rows(args.checkpoint_root / "learned" / "models.csv")
-    selected["lista_snn_1"] = read_final_slista(args.checkpoint_root / "final_slista")
     paths = {key: checkpoint_path(selected[key]) for key in LABELS}
     missing = [str(p) for p in paths.values() if not p.is_file()]
     if missing:
@@ -234,14 +229,14 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from config import Config
-    from snn_models import ALISTA, LAMP, HybridLISTA
+    from snn_models import ALISTA, LAMP, LISTA, SpikingLISTA
     from utils import MITBIH_Dataset
     device = configure(Config, args, torch)
     dataset = MITBIH_Dataset("test")
     loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size,
                                          shuffle=False, num_workers=0)
     grid = snr_grid(args.snr_min, args.snr_max, args.snr_step)
-    classes = {"lista_ann": HybridLISTA, "alista": ALISTA, "lamp": LAMP, "lista_snn_1": HybridLISTA}
+    classes = {"lista_ann": LISTA, "alista": ALISTA, "lamp": LAMP, "lista_snn_1": SpikingLISTA}
     args.output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "status": "running", "training_performed": False,
@@ -254,9 +249,10 @@ def main():
         "channel_seed": args.seed, "common_channel_draws": True,
         "realizations_per_snr": 1, "batch_size": args.batch_size,
         "max_batches": args.max_batches, "device": str(device),
-        "train_snr_db": 5, "N": 256, "M": 78, "K": 8, "T": 1,
+        "train_snr_db": 5, "N": 256, "M": 78, "K": 8,
         "quant_bits": 8, "quant_clip_value": 3.0,
-        "theta_snn": 1.0, "final_theta_snn": 0.2,
+        "slista": {"spiking_layers": 7, "readout": "z + eta * m * I^(L)",
+                   "beta": Config.SLISTA_BETA, "alpha": Config.SLISTA_ALPHA},
         "torch_version": torch.__version__, "numpy_version": np.__version__,
         "source_sha256": {name: hashlib.sha256((args.project_dir / name).read_bytes()).hexdigest()
                           for name in ("config.py", "snn_models.py", "edge_compression.py", "utils.py")},

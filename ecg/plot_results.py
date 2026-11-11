@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Evaluation cache and composite figure of the ECG experiments (Fig. 3).
+
+The trained models are loaded, evaluated on the test set (NMSE, robustness to
+AWGN, firing statistics of S-LISTA, example beats) and the results are cached;
+plot_composite draws the figure from the cache.
+"""
 import argparse
 import csv
 import json
@@ -14,7 +20,7 @@ import torch
 from config import Config, PROJECT_DIR, DEFAULT_OUTPUT
 from edge_compression import EdgeSensor
 from wireless_channel import WirelessChannel
-from snn_models import ALISTA, LAMP, HybridLISTA
+from snn_models import ALISTA, LAMP, LISTA, SpikingLISTA
 from trainer import Trainer
 import utils
 
@@ -49,8 +55,8 @@ MARKERS = {
 MODEL_SPECS = {
     "alista": (ALISTA, "ann"),
     "lamp": (LAMP, "ann"),
-    "lista_ann": (HybridLISTA, "ann"),
-    "lista_snn_1": (HybridLISTA, "spiking"),
+    "lista_ann": (LISTA, "ann"),
+    "lista_snn_1": (SpikingLISTA, "spiking"),
 }
 SNR_GRID = [-5.0, -2.0, 0.0, 2.0, 5.0, 7.5, 10.0, 12.5, 15.0, 20.0]
 
@@ -61,7 +67,6 @@ def configure(args):
     Config.EFFECTIVE_TOTAL_MEAS = 78
     Config.NUM_LAYERS = 8
     Config.FISTA_ITERATIONS = 8
-    Config.TIME_STEPS = 1
     Config.QUANT_BITS = 8
     Config.BITS_PER_SAMPLE = Config.M * Config.QUANT_BITS
     Config.TRAIN_SNR_DB = float(args.train_snr_db)
@@ -94,20 +99,6 @@ def read_best_rows(path):
                     row["Trial_Dir"] = str((path.parent / trial).resolve())
                 rows[row["Target"]] = row
     return rows
-
-
-def read_final_slista(results_dir):
-    path = results_dir / "results.csv"
-    frame = pd.read_csv(path)
-    frame = frame[frame["Model"] == "Spiking LISTA"]
-    row = frame.loc[frame["Val_NMSE_dB"].idxmin()]
-    return {
-        "Target": "lista_snn_1",
-        "Checkpoint": str(row["checkpoint"]),
-        "Trial_Dir": str(results_dir),
-        "Val_NMSE_dB": float(row["Val_NMSE_dB"]),
-        "Test_NMSE_dB": float(row["Test_NMSE_dB"]),
-    }
 
 
 def build_objects(best_rows, train_loader, eval_loader):
@@ -213,16 +204,25 @@ def representative_indices(target, reconstructions, count=3):
 
 @torch.no_grad()
 def firing_statistics(slista_obj, loader, max_batches=None):
+    """Per-layer firing statistics of the L-1 spiking layers, from the single
+    S-LISTA forward implementation (SpikingLISTA.trace).
+
+    Two-channel convention: a signed neuron is a positive and a
+    negative channel, so layer_positive + layer_negative is the firing rate
+    of the layer (spikes / (2 n)).  layer_drive_ratio is the mean of
+    |I^(l)| / theta_l over neurons and samples."""
     model = slista_obj["model"]
     sensor = slista_obj["sensor"]
     channel = slista_obj["channel"]
     model.set_mode("spiking")
     channel.snr_db = Config.TRAIN_SNR_DB
-    positive = torch.zeros(Config.NUM_LAYERS, Config.N, dtype=torch.float64)
+    layers = model.spiking_layers
+    positive = torch.zeros(layers, Config.N, dtype=torch.float64)
     negative = torch.zeros_like(positive)
-    net_layer_atom = torch.zeros_like(positive)
-    drive_ratio_sum = torch.zeros(Config.NUM_LAYERS, dtype=torch.float64)
+    code_magnitude = torch.zeros_like(positive)
+    drive_ratio_sum = torch.zeros(layers, dtype=torch.float64)
     sample_count = 0
+    theta = model.theta.detach()
 
     with utils.deterministic_eval(Config.EVAL_CHANNEL_SEED):
         for batch in limited_batches(loader, max_batches):
@@ -232,37 +232,24 @@ def firing_statistics(slista_obj, loader, max_batches=None):
             y_recv, _ = channel(
                 y, mode="shared", channel_mode=Config.EVAL_CHANNEL_MODE
             )
-            drive0 = model.P_snn(y_recv)
-            z = torch.zeros_like(drive0)
-            for stage in range(Config.NUM_LAYERS):
-                drive = (
-                    drive0 if stage == 0
-                    else drive0 - model.PD_snn_k[stage - 1](z)
-                )
-                theta = getattr(model, f"theta_snn_{stage}")
-                spike_pos = (drive >= theta).to(drive.dtype)
-                spike_neg = (-drive >= theta).to(drive.dtype)
-                signed_spike = spike_pos - spike_neg
-                positive[stage] += spike_pos.sum(dim=0).cpu().double()
-                negative[stage] += spike_neg.sum(dim=0).cpu().double()
-                z = z + signed_spike
-                net_layer_atom[stage] += z.abs().sum(dim=0).cpu().double()
-                drive_ratio_sum[stage] += (
-                    drive.abs() / theta.clamp_min(1e-8)
+            trace = model.trace(y_recv)
+            for layer in range(layers):
+                spike = trace["spikes"][layer]
+                positive[layer] += (spike > 0).sum(dim=0).cpu().double()
+                negative[layer] += (spike < 0).sum(dim=0).cpu().double()
+                code_magnitude[layer] += trace["codes"][layer].abs().sum(dim=0).cpu().double()
+                drive_ratio_sum[layer] += (
+                    trace["currents"][layer].abs() / theta[layer]
                 ).sum().cpu().double()
             sample_count += x.shape[0]
 
     positive /= max(sample_count, 1)
     negative /= max(sample_count, 1)
-    atom_rate = (positive + negative).mean(dim=0).numpy()
-    layer_positive = positive.mean(dim=1).numpy()
-    layer_negative = negative.mean(dim=1).numpy()
-    layer_atom_rate = (positive + negative).numpy()
-    layer_numbers = torch.arange(
-        1, Config.NUM_LAYERS + 1, dtype=torch.float64
-    ).unsqueeze(1)
-    net_layer_atom /= max(sample_count, 1) * layer_numbers
-    net_layer_atom_rate = net_layer_atom.numpy()
+    atom_rate = ((positive + negative) / 2.0).mean(dim=0).numpy()
+    layer_positive = (positive / 2.0).mean(dim=1).numpy()
+    layer_negative = (negative / 2.0).mean(dim=1).numpy()
+    layer_atom_rate = ((positive + negative) / 2.0).numpy()
+    net_layer_atom_rate = (code_magnitude / max(sample_count, 1)).numpy()
     layer_drive_ratio = (
         drive_ratio_sum / max(sample_count * Config.N, 1)
     ).numpy()
@@ -577,8 +564,8 @@ def plot_composite(cache, robustness, fixed_nmse, learned_nmse, quant, args, ray
     )
 
     axis = axes[4]
-    layer_index = np.arange(1, Config.NUM_LAYERS + 1)
     positive = np.asarray(cache["layer_positive"], dtype=float)
+    layer_index = np.arange(1, len(positive) + 1)
     negative = np.asarray(cache["layer_negative"], dtype=float)
     axis.bar(layer_index, positive, yerr=cache.get("layer_positive_std"), capsize=3, color="#D49A3A", label="Positive")
     axis.bar(
@@ -587,8 +574,8 @@ def plot_composite(cache, robustness, fixed_nmse, learned_nmse, quant, args, ray
         yerr=cache.get("layer_total_std"), capsize=3,
     )
     axis.set_xticks(layer_index)
-    axis.set_xlabel("Unfolded layer")
-    axis.set_ylabel("Firing probability")
+    axis.set_xlabel("Spiking layer")
+    axis.set_ylabel("Firing rate")
     total_firing = positive + negative
     axis.set_ylim(0, (total_firing + np.asarray(cache.get("layer_total_std",0))).max() * 1.35)
     axis.grid(axis="y", linestyle="--", alpha=0.3)
@@ -601,14 +588,12 @@ def plot_composite(cache, robustness, fixed_nmse, learned_nmse, quant, args, ray
     if "layer_drive_ratio_std" in cache:
         sd=np.asarray(cache["layer_drive_ratio_std"]); mean=np.asarray(cache["layer_drive_ratio"])
         drive_axis.fill_between(layer_index,mean-sd,mean+sd,color="#222222",alpha=.15)
-    drive_axis.set_ylabel(r"Normalized drive $|u_\ell|/\theta$")
-    drive_axis.set_ylim(0, 2.0)
-    drive_axis.set_yticks([0, 0.5, 1.0, 1.5, 2.0])
+    drive_axis.set_ylabel(r"Normalized drive $|I^{(\ell)}|/\vartheta_\ell$")
     drive_values = np.asarray(cache["layer_drive_ratio"], dtype=float)
-    drive_padding = max(0.10, 0.30 * (drive_values.max() - drive_values.min()))
-    drive_axis.set_ylim(
-        0, 2.0
-    )
+    drive_top = drive_values + np.asarray(cache.get("layer_drive_ratio_std", 0.0), dtype=float)
+    drive_limit = max(2.0, 0.5 * np.ceil(1.15 * float(np.max(drive_top)) / 0.5))
+    drive_axis.set_ylim(0, drive_limit)
+    drive_axis.set_yticks(np.arange(0, drive_limit + 1e-9, 0.5))
     spike_handles, spike_labels = axis.get_legend_handles_labels()
     axis.legend(
         spike_handles + drive_line,
@@ -627,10 +612,12 @@ def plot_composite(cache, robustness, fixed_nmse, learned_nmse, quant, args, ray
         color=[COLORS[target_name] for target_name in TARGETS],
         edgecolor="black", linewidth=0.6,
     )
+    # Rotated labels anchored at their right end, so each name ends under its
+    # own bar and neighbouring names stay apart.
     axis.set_xticks(
         operation_x,
         [LABELS[target_name] for target_name in TARGETS],
-        rotation=20, ha="right",
+        rotation=30, ha="right", rotation_mode="anchor",
     )
     axis.set_ylabel(r"Energy ($\mu$J/sample)")
     axis.set_ylim(0, max(energy_values[i]+cache.get("energy_std",{}).get(t,0) for i,t in enumerate(TARGETS)) * 1.22)
@@ -772,10 +759,6 @@ def parse_args():
         default=Path(PROJECT_DIR / "outputs/learned/models.csv"),
     )
     parser.add_argument(
-        "--slista-results-dir", type=Path,
-        default=Path(PROJECT_DIR / "outputs/final_slista"),
-    )
-    parser.add_argument(
         "--fixed-best-csv", type=Path,
         default=Path(PROJECT_DIR / "outputs/fixed/models.csv"),
     )
@@ -799,7 +782,7 @@ def main():
     root = args.output.expanduser().resolve()
     for field, relative in {
         "warm_best_csv": "learned/models.csv", "fixed_best_csv": "fixed/models.csv",
-        "slista_results_dir": "final_slista", "quant_results_csv": "quantization/results.csv",
+        "quant_results_csv": "quantization/results.csv",
         "cache_dir": "cache", "output_dir": "figures", "rayleigh_results_csv": "rayleigh/snr_scan.csv"
     }.items():
         if "--" + field.replace("_", "-") not in [v.split("=")[0] for v in __import__("sys").argv[1:]]:
@@ -813,8 +796,9 @@ def main():
     utils.set_seed(Config.SEED)
     train_loader, eval_loader = utils.get_dataloaders(eval_split="test")
     warm_rows = read_best_rows(args.warm_best_csv)
-    final_slista = read_final_slista(args.slista_results_dir)
-    warm_rows["lista_snn_1"] = final_slista
+    missing = [t for t in TARGETS if t not in warm_rows]
+    if missing:
+        raise FileNotFoundError(f"{args.warm_best_csv}: missing {missing}")
     identity = {
         "checkpoints": {key: hashlib.sha256(checkpoint_path(row).read_bytes()).hexdigest()
                         for key, row in warm_rows.items()},
@@ -831,13 +815,17 @@ def main():
     cache_identity.write_text(json.dumps(identity, indent=2) + "\n")
     fixed_nmse = best_values(args.fixed_best_csv)
     learned_nmse = best_values(args.warm_best_csv)
-    learned_nmse["lista_snn_1"] = float(final_slista["Test_NMSE_dB"])
+    # 8 bit/measurement is the learned-dictionary model itself (identical
+    # configuration), so the quantization panel takes it from learned/.
     quant = quantization_values(args.quant_results_csv)
-    quant.loc[
-        (quant["Target"] == "lista_snn_1")
-        & (quant["Quant_Bits"].astype(int) == 8),
-        "Test_NMSE_dB",
-    ] = float(final_slista["Test_NMSE_dB"])
+    quant = quant[quant["Quant_Bits"].astype(int) != 8]
+    eight_bit = pd.DataFrame([
+        {"Target": target, "Model": LABELS[target], "Status": "ok",
+         "Test_NMSE_dB": value, "Quant_Bits": 8,
+         "Bits_Per_Sample": 8 * Config.M}
+        for target, value in learned_nmse.items()
+    ])
+    quant = pd.concat([quant, eight_bit], ignore_index=True)
     utils.atomic_torch_save(dict(cache=cache, robustness=robustness, fixed_nmse=fixed_nmse,
         learned_nmse=learned_nmse, quant=quant, rayleigh=rayleigh, identity=identity), root / 'plot_data.pt')
     plot_composite(cache, robustness, fixed_nmse, learned_nmse, quant, args, rayleigh)
